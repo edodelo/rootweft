@@ -25,7 +25,9 @@ _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "secret_assignment",
         re.compile(
-            r"(?im)^\s*(?:password|passwd|pwd|secret)\s*(?:=|:)\s*[^\s#]+"
+            r"(?im)(?:^|[,{]\s*)[\"']?(?:client_secret|database_password|"
+            r"aws_secret_access_key|password|passwd|pwd|secret)[\"']?\s*(?:=|:)\s*"
+            r"(?:[\"'][^\"'\r\n]+[\"']|[^\s#,}\]]+)"
         ),
     ),
 )
@@ -45,6 +47,10 @@ _HIGH_RISK_NAMES = frozenset(
         "id_dsa",
         "id_ecdsa",
         "id_ed25519",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        ".git-credentials",
     }
 )
 _HIGH_RISK_SUFFIXES = (".pem", ".key", ".p12", ".pfx")

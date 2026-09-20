@@ -48,6 +48,10 @@ _CREDENTIAL_NAMES = frozenset(
         "id_dsa",
         "id_ecdsa",
         "id_ed25519",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        ".git-credentials",
     }
 )
 _CREDENTIAL_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
@@ -64,6 +68,7 @@ _LANGUAGES = {
     ".mdx": "markdown",
 }
 _MAX_DIAGNOSTICS = 100
+_WINDOWS_REPARSE_POINT = 0x400
 
 
 @dataclass(frozen=True)
@@ -115,6 +120,15 @@ class ScanResult:
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
 
 
+@dataclass(frozen=True)
+class _FileCandidate:
+    path: str
+    expected_stat: os.stat_result
+    disk_path: Path | None = None
+    parent_fd: int | None = None
+    name: str | None = None
+
+
 def scan_repository(
     root: Path,
     limits: ScanLimits,
@@ -146,18 +160,126 @@ def scan_repository(
     files: list[ScannedFile] = []
     diagnostics: list[Diagnostic] = []
     total_bytes = 0
+    candidate_count = 0
 
-    discovered_files = sorted(
-        _walk_files(canonical_root, extra_ignores, diagnostics),
-        key=lambda item: item[1],
-    )
-    for disk_path, relative_path in discovered_files:
-        if len(files) >= limits.max_files:
-            _add_diagnostic(diagnostics, "max_files", relative_path)
+    for candidate in _walk_files(canonical_root, extra_ignores, diagnostics):
+        candidate_count += 1
+        if candidate_count > limits.max_files:
+            _add_diagnostic(diagnostics, "max_files", candidate.path)
+            break
+        if candidate.expected_stat.st_size > limits.max_file_bytes:
+            _add_diagnostic(diagnostics, "max_file_bytes", candidate.path)
+            continue
+        remaining_bytes = limits.max_total_bytes - total_bytes
+        if candidate.expected_stat.st_size > remaining_bytes:
+            _add_diagnostic(diagnostics, "max_total_bytes", candidate.path)
             break
 
+        raw = _read_regular_file(
+            candidate,
+            limits.max_file_bytes,
+            remaining_bytes,
+            canonical_root,
+            diagnostics,
+        )
+        if raw is None:
+            continue
+        total_bytes += len(raw)
+        if b"\x00" in raw:
+            _add_diagnostic(diagnostics, "binary_file", candidate.path)
+            continue
         try:
-            entry_stat = os.stat(disk_path, follow_symlinks=False)
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            _add_diagnostic(diagnostics, "invalid_encoding", candidate.path)
+            continue
+
+        files.append(
+            ScannedFile(
+                path=candidate.path,
+                language=_language_for(candidate.path),
+                text=text,
+                sha256=sha256(raw).hexdigest(),
+            )
+        )
+
+    return ScanResult(files=tuple(files), diagnostics=tuple(diagnostics))
+
+
+def _walk_files(
+    root: Path,
+    extra_ignores: tuple[str, ...],
+    diagnostics: list[Diagnostic],
+) -> Iterator[_FileCandidate]:
+    if os.name == "nt":
+        root_stat = _lstat_directory(root, "", diagnostics)
+        if root_stat is not None:
+            yield from _walk_files_windows(
+                root,
+                root,
+                PurePosixPath("."),
+                root_stat,
+                extra_ignores,
+                diagnostics,
+            )
+        return
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow == 0:
+        _add_diagnostic(diagnostics, "unsafe_directory_primitive", "")
+        return
+    try:
+        root_fd = os.open(root, directory_flags | nofollow)
+    except OSError:
+        _add_diagnostic(diagnostics, "unreadable_directory", "")
+        return
+    try:
+        if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+            _add_diagnostic(diagnostics, "unreadable_directory", "")
+            return
+        yield from _walk_files_posix(
+            root_fd, PurePosixPath("."), extra_ignores, diagnostics
+        )
+    finally:
+        os.close(root_fd)
+
+
+def _walk_files_posix(
+    directory_fd: int,
+    relative_directory: PurePosixPath,
+    extra_ignores: tuple[str, ...],
+    diagnostics: list[Diagnostic],
+) -> Iterator[_FileCandidate]:
+    try:
+        with os.scandir(directory_fd) as entries:
+            ordered_entries = sorted(entries, key=lambda entry: entry.name)
+    except PermissionError:
+        _add_diagnostic(
+            diagnostics, "permission_denied", _display_path(relative_directory)
+        )
+        return
+    except FileNotFoundError:
+        _add_diagnostic(
+            diagnostics, "disappeared_directory", _display_path(relative_directory)
+        )
+        return
+    except OSError:
+        _add_diagnostic(
+            diagnostics, "unreadable_directory", _display_path(relative_directory)
+        )
+        return
+
+    for entry in ordered_entries:
+        relative = relative_directory / entry.name
+        relative_path = _display_path(relative)
+        if _is_ignored(relative, entry.name, extra_ignores):
+            continue
+        try:
+            if entry.is_symlink():
+                _add_diagnostic(diagnostics, "symlink_skipped", relative_path)
+                continue
+            entry_stat = entry.stat(follow_symlinks=False)
         except FileNotFoundError:
             _add_diagnostic(diagnostics, "disappeared_file", relative_path)
             continue
@@ -168,91 +290,138 @@ def scan_repository(
             _add_diagnostic(diagnostics, "unreadable_file", relative_path)
             continue
 
-        if not stat.S_ISREG(entry_stat.st_mode):
-            _add_diagnostic(diagnostics, "special_file", relative_path)
-            continue
-        if entry_stat.st_size > limits.max_file_bytes:
-            _add_diagnostic(diagnostics, "max_file_bytes", relative_path)
-            continue
-        if total_bytes + entry_stat.st_size > limits.max_total_bytes:
-            _add_diagnostic(diagnostics, "max_total_bytes", relative_path)
-            break
-
-        raw = _read_regular_file(
-            disk_path,
-            relative_path,
-            entry_stat,
-            limits.max_file_bytes,
-            diagnostics,
-        )
-        if raw is None:
-            continue
-        if len(raw) > limits.max_file_bytes:
-            _add_diagnostic(diagnostics, "max_file_bytes", relative_path)
-            continue
-        if total_bytes + len(raw) > limits.max_total_bytes:
-            _add_diagnostic(diagnostics, "max_total_bytes", relative_path)
-            break
-        if b"\x00" in raw:
-            _add_diagnostic(diagnostics, "binary_file", relative_path)
-            continue
-        try:
-            text = raw.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            _add_diagnostic(diagnostics, "invalid_encoding", relative_path)
-            continue
-
-        files.append(
-            ScannedFile(
-                path=relative_path,
-                language=_language_for(relative_path),
-                text=text,
-                sha256=sha256(raw).hexdigest(),
+        if stat.S_ISDIR(entry_stat.st_mode):
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
             )
-        )
-        total_bytes += len(raw)
-
-    return ScanResult(files=tuple(files), diagnostics=tuple(diagnostics))
-
-
-def _walk_files(
-    root: Path,
-    extra_ignores: tuple[str, ...],
-    diagnostics: list[Diagnostic],
-) -> Iterator[tuple[Path, str]]:
-    pending: list[tuple[Path, PurePosixPath]] = [(root, PurePosixPath("."))]
-    while pending:
-        directory, relative_directory = pending.pop()
-        try:
-            with os.scandir(directory) as entries:
-                ordered_entries = sorted(entries, key=lambda entry: entry.name)
-        except PermissionError:
-            _add_diagnostic(
-                diagnostics, "permission_denied", _display_path(relative_directory)
-            )
-            continue
-        except FileNotFoundError:
-            _add_diagnostic(
-                diagnostics, "disappeared_directory", _display_path(relative_directory)
-            )
-            continue
-        except OSError:
-            _add_diagnostic(
-                diagnostics, "unreadable_directory", _display_path(relative_directory)
-            )
-            continue
-
-        child_directories: list[tuple[Path, PurePosixPath]] = []
-        for entry in ordered_entries:
-            relative = relative_directory / entry.name
-            relative_path = _display_path(relative)
-            if _is_ignored(relative, entry.name, extra_ignores):
+            try:
+                child_fd = os.open(entry.name, flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                _add_diagnostic(diagnostics, "disappeared_directory", relative_path)
+                continue
+            except PermissionError:
+                _add_diagnostic(diagnostics, "permission_denied", relative_path)
+                continue
+            except OSError:
+                _add_diagnostic(diagnostics, "symlink_skipped", relative_path)
                 continue
             try:
-                if entry.is_symlink():
-                    _add_diagnostic(diagnostics, "symlink_skipped", relative_path)
+                opened_stat = os.fstat(child_fd)
+                if not stat.S_ISDIR(opened_stat.st_mode) or not _same_file(
+                    entry_stat, opened_stat
+                ):
+                    _add_diagnostic(diagnostics, "changed_directory", relative_path)
                     continue
-                entry_stat = entry.stat(follow_symlinks=False)
+                yield from _walk_files_posix(
+                    child_fd, relative, extra_ignores, diagnostics
+                )
+            finally:
+                os.close(child_fd)
+        elif stat.S_ISREG(entry_stat.st_mode):
+            yield _FileCandidate(
+                path=relative_path,
+                expected_stat=entry_stat,
+                parent_fd=directory_fd,
+                name=entry.name,
+            )
+        else:
+            _add_diagnostic(diagnostics, "special_file", relative_path)
+
+
+def _walk_files_windows(
+    directory: Path,
+    root: Path,
+    relative_directory: PurePosixPath,
+    expected_stat: os.stat_result,
+    extra_ignores: tuple[str, ...],
+    diagnostics: list[Diagnostic],
+) -> Iterator[_FileCandidate]:
+    if not _windows_path_is_within_root(directory, root):
+        _add_diagnostic(
+            diagnostics, "root_escape", _display_path(relative_directory)
+        )
+        return
+    before = _lstat_directory(
+        directory, _display_path(relative_directory), diagnostics
+    )
+    if before is None:
+        return
+    if not _same_file(before, expected_stat):
+        _add_diagnostic(
+            diagnostics, "changed_directory", _display_path(relative_directory)
+        )
+        return
+    try:
+        with os.scandir(directory) as entries:
+            ordered_entries = sorted(entries, key=lambda entry: entry.name)
+    except PermissionError:
+        _add_diagnostic(
+            diagnostics, "permission_denied", _display_path(relative_directory)
+        )
+        return
+    except FileNotFoundError:
+        _add_diagnostic(
+            diagnostics, "disappeared_directory", _display_path(relative_directory)
+        )
+        return
+    except OSError:
+        _add_diagnostic(
+            diagnostics, "unreadable_directory", _display_path(relative_directory)
+        )
+        return
+    after = _lstat_directory(directory, _display_path(relative_directory), diagnostics)
+    if after is None:
+        return
+    if not _windows_path_is_within_root(directory, root):
+        _add_diagnostic(
+            diagnostics, "root_escape", _display_path(relative_directory)
+        )
+        return
+    if not _same_file(after, expected_stat):
+        _add_diagnostic(
+            diagnostics, "changed_directory", _display_path(relative_directory)
+        )
+        return
+
+    for entry in ordered_entries:
+        relative = relative_directory / entry.name
+        relative_path = _display_path(relative)
+        if _is_ignored(relative, entry.name, extra_ignores):
+            continue
+        try:
+            if entry.is_symlink():
+                _add_diagnostic(diagnostics, "symlink_skipped", relative_path)
+                continue
+            entry_stat = entry.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            _add_diagnostic(diagnostics, "disappeared_file", relative_path)
+            continue
+        except PermissionError:
+            _add_diagnostic(diagnostics, "permission_denied", relative_path)
+            continue
+        except OSError:
+            _add_diagnostic(diagnostics, "unreadable_file", relative_path)
+            continue
+        if _is_reparse_point(entry_stat):
+            _add_diagnostic(diagnostics, "reparse_point_skipped", relative_path)
+        elif stat.S_ISDIR(entry_stat.st_mode):
+            child_path = Path(entry.path)
+            child_stat = _lstat_directory(child_path, relative_path, diagnostics)
+            if child_stat is not None:
+                yield from _walk_files_windows(
+                    child_path,
+                    root,
+                    relative,
+                    child_stat,
+                    extra_ignores,
+                    diagnostics,
+                )
+        elif stat.S_ISREG(entry_stat.st_mode):
+            file_path = Path(entry.path)
+            try:
+                file_stat = os.stat(file_path, follow_symlinks=False)
             except FileNotFoundError:
                 _add_diagnostic(diagnostics, "disappeared_file", relative_path)
                 continue
@@ -262,52 +431,131 @@ def _walk_files(
             except OSError:
                 _add_diagnostic(diagnostics, "unreadable_file", relative_path)
                 continue
-
-            if stat.S_ISDIR(entry_stat.st_mode):
-                child_directories.append((Path(entry.path), relative))
-            elif stat.S_ISREG(entry_stat.st_mode):
-                yield Path(entry.path), relative_path
-            else:
-                _add_diagnostic(diagnostics, "special_file", relative_path)
-
-        pending.extend(reversed(child_directories))
+            if _is_reparse_point(file_stat) or not stat.S_ISREG(file_stat.st_mode):
+                _add_diagnostic(diagnostics, "changed_file", relative_path)
+                continue
+            yield _FileCandidate(relative_path, file_stat, disk_path=file_path)
+        else:
+            _add_diagnostic(diagnostics, "special_file", relative_path)
 
 
 def _read_regular_file(
-    path: Path,
-    relative_path: str,
-    expected_stat: os.stat_result,
+    candidate: _FileCandidate,
     max_file_bytes: int,
+    remaining_bytes: int,
+    root: Path,
     diagnostics: list[Diagnostic],
 ) -> bytes | None:
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags | nofollow)
-    except FileNotFoundError:
-        _add_diagnostic(diagnostics, "disappeared_file", relative_path)
-        return None
-    except PermissionError:
-        _add_diagnostic(diagnostics, "permission_denied", relative_path)
-        return None
-    except OSError:
-        _add_diagnostic(diagnostics, "unreadable_file", relative_path)
+    if candidate.parent_fd is not None and candidate.name is not None:
+        try:
+            descriptor = os.open(
+                candidate.name, flags | nofollow, dir_fd=candidate.parent_fd
+            )
+        except FileNotFoundError:
+            _add_diagnostic(diagnostics, "disappeared_file", candidate.path)
+            return None
+        except PermissionError:
+            _add_diagnostic(diagnostics, "permission_denied", candidate.path)
+            return None
+        except OSError:
+            _add_diagnostic(diagnostics, "unreadable_file", candidate.path)
+            return None
+    elif candidate.disk_path is not None:
+        try:
+            descriptor = os.open(candidate.disk_path, flags | nofollow)
+        except FileNotFoundError:
+            _add_diagnostic(diagnostics, "disappeared_file", candidate.path)
+            return None
+        except PermissionError:
+            _add_diagnostic(diagnostics, "permission_denied", candidate.path)
+            return None
+        except OSError:
+            _add_diagnostic(diagnostics, "unreadable_file", candidate.path)
+            return None
+    else:
+        _add_diagnostic(diagnostics, "unsafe_file_primitive", candidate.path)
         return None
 
     try:
         opened_stat = os.fstat(descriptor)
         if not stat.S_ISREG(opened_stat.st_mode) or not _same_file(
-            expected_stat, opened_stat
+            candidate.expected_stat, opened_stat
         ):
-            _add_diagnostic(diagnostics, "changed_file", relative_path)
+            _add_diagnostic(diagnostics, "changed_file", candidate.path)
+            return None
+        if opened_stat.st_size > max_file_bytes:
+            _add_diagnostic(diagnostics, "max_file_bytes", candidate.path)
+            return None
+        if opened_stat.st_size > remaining_bytes:
+            _add_diagnostic(diagnostics, "max_total_bytes", candidate.path)
+            return None
+        if os.name == "nt" and not _windows_handle_is_within_root(descriptor, root):
+            _add_diagnostic(diagnostics, "root_escape", candidate.path)
             return None
         with os.fdopen(descriptor, "rb", closefd=False) as source:
-            return source.read(max_file_bytes + 1)
+            return source.read(opened_stat.st_size)
     except OSError:
-        _add_diagnostic(diagnostics, "unreadable_file", relative_path)
+        _add_diagnostic(diagnostics, "unreadable_file", candidate.path)
         return None
     finally:
         os.close(descriptor)
+
+
+def _lstat_directory(
+    path: Path, relative_path: str, diagnostics: list[Diagnostic]
+) -> os.stat_result | None:
+    try:
+        entry_stat = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        _add_diagnostic(diagnostics, "disappeared_directory", relative_path)
+        return None
+    except PermissionError:
+        _add_diagnostic(diagnostics, "permission_denied", relative_path)
+        return None
+    except OSError:
+        _add_diagnostic(diagnostics, "unreadable_directory", relative_path)
+        return None
+    if _is_reparse_point(entry_stat) or not stat.S_ISDIR(entry_stat.st_mode):
+        _add_diagnostic(diagnostics, "symlink_skipped", relative_path)
+        return None
+    return entry_stat
+
+
+def _is_reparse_point(value: os.stat_result) -> bool:
+    return bool(getattr(value, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT)
+
+
+def _windows_handle_is_within_root(descriptor: int, root: Path) -> bool:
+    """Validate the opened Windows handle's final target before source reads."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    import msvcrt
+
+    buffer = ctypes.create_unicode_buffer(32_768)
+    length = ctypes.windll.kernel32.GetFinalPathNameByHandleW(
+        msvcrt.get_osfhandle(descriptor), buffer, len(buffer), 0
+    )
+    if length == 0 or length >= len(buffer):
+        return False
+    final_path = buffer.value.removeprefix("\\\\?\\")
+    try:
+        return os.path.commonpath(
+            (os.path.normcase(final_path), os.path.normcase(os.path.realpath(root)))
+        ) == os.path.normcase(os.path.realpath(root))
+    except ValueError:
+        return False
+
+
+def _windows_path_is_within_root(path: Path, root: Path) -> bool:
+    try:
+        final_path = os.path.normcase(os.path.realpath(path))
+        final_root = os.path.normcase(os.path.realpath(root))
+        return os.path.commonpath((final_path, final_root)) == final_root
+    except (OSError, ValueError):
+        return False
 
 
 def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
