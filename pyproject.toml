@@ -19,9 +19,6 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 
-[project.scripts]
-rootweft = "rootweft.cli:main"
-
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from rootweft.errors import IncompatibleSchemaError
+from rootweft.errors import CorruptGraphError, IncompatibleSchemaError
 from rootweft.models import (
     AdjudicationLayer,
     Edge,
@@ -80,3 +80,29 @@ def test_rejects_newer_schema(tmp_path: Path) -> None:
 
     with pytest.raises(IncompatibleSchemaError):
         load_graph(path)
+
+
+def test_rejects_corrupt_json(tmp_path: Path) -> None:
+    """Catches malformed graph payloads being accepted or leaking decoder errors."""
+    path = tmp_path / "graph.json"
+    path.write_text("{", encoding="utf-8")
+
+    with pytest.raises(CorruptGraphError):
+        load_graph(path)
+
+
+def test_failed_replace_removes_the_temporary_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches failed atomic replacement leaving a partial sibling artifact behind."""
+    path = tmp_path / "graph.json"
+
+    def fail_replace(source: str, destination: Path) -> None:
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr("rootweft.serialization.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        dump_graph(minimal_graph(nodes_in_reverse_order=False), path)
+
+    assert list(tmp_path.glob(".graph.json.*.tmp")) == []

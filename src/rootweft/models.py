@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
-from typing import Any, Self
+from typing import Any, Self, TypeVar
 
 SCHEMA_VERSION = "rootweft.graph.v1"
 
@@ -33,8 +34,62 @@ def _model_id(value: str, *, field_name: str) -> str:
     return value
 
 
+def _freeze_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError("JSON object keys must be strings")
+        return MappingProxyType(
+            {key: _freeze_json(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise ValueError("value must be JSON-compatible")
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
 def _mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
-    return MappingProxyType(dict(value))
+    frozen = _freeze_json(value)
+    if not isinstance(frozen, Mapping):
+        raise ValueError("metadata must be a JSON object")
+    return frozen
+
+
+T = TypeVar("T")
+
+
+def _tuple(value: tuple[T, ...] | list[T]) -> tuple[T, ...]:
+    return tuple(value)
+
+
+def _require_unique_ids(items: tuple[Any, ...], *, label: str) -> None:
+    identifiers = [item.id for item in items]
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError(f"duplicate {label} id")
+
+
+def _evidence_sort_key(evidence: Evidence | None) -> tuple[str, int, int]:
+    if evidence is None:
+        return ("", 0, 0)
+    return (evidence.path, evidence.start_line, evidence.end_line)
+
+
+def _json_sort_key(value: Mapping[str, Any] | None) -> str:
+    return json.dumps(
+        _thaw_json(value) if value is not None else None,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -87,7 +142,7 @@ class Node:
             "qualified_name": self.qualified_name,
             "language": self.language,
             "evidence": self.evidence.to_dict(),
-            "metadata": dict(self.metadata),
+            "metadata": _thaw_json(self.metadata),
         }
 
     @classmethod
@@ -137,7 +192,7 @@ class Edge:
             "evidence": self.evidence.to_dict(),
         }
         if self.decision_provenance is not None:
-            result["decision_provenance"] = dict(self.decision_provenance)
+            result["decision_provenance"] = _thaw_json(self.decision_provenance)
         return result
 
     @classmethod
@@ -168,8 +223,10 @@ class Candidate:
     def __post_init__(self) -> None:
         _model_id(self.id, field_name="candidate id")
         _model_id(self.source, field_name="source")
-        for option in self.options:
+        options = _tuple(self.options)
+        for option in options:
             _model_id(option, field_name="candidate option")
+        object.__setattr__(self, "options", options)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -237,7 +294,7 @@ class Decision:
             "id": self.id,
             "candidate_id": self.candidate_id,
             "state": self.state,
-            "provenance": dict(self.provenance),
+            "provenance": _thaw_json(self.provenance),
         }
 
     @classmethod
@@ -256,13 +313,48 @@ class StructuralLayer:
     edges: tuple[Edge, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
 
+    def __post_init__(self) -> None:
+        nodes = _tuple(self.nodes)
+        edges = _tuple(self.edges)
+        diagnostics = _tuple(self.diagnostics)
+        _require_unique_ids(nodes, label="node")
+        _require_unique_ids(edges, label="edge")
+        object.__setattr__(self, "nodes", nodes)
+        object.__setattr__(self, "edges", edges)
+        object.__setattr__(self, "diagnostics", diagnostics)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "nodes": [
-                node.to_dict() for node in sorted(self.nodes, key=lambda node: node.id)
+                node.to_dict()
+                for node in sorted(
+                    self.nodes,
+                    key=lambda node: (
+                        node.id,
+                        node.kind,
+                        node.name,
+                        node.qualified_name or "",
+                        node.language,
+                        _evidence_sort_key(node.evidence),
+                        _json_sort_key(node.metadata),
+                    ),
+                )
             ],
             "edges": [
-                edge.to_dict() for edge in sorted(self.edges, key=lambda edge: edge.id)
+                edge.to_dict()
+                for edge in sorted(
+                    self.edges,
+                    key=lambda edge: (
+                        edge.id,
+                        edge.source,
+                        edge.target,
+                        edge.relation,
+                        edge.origin,
+                        edge.status,
+                        _evidence_sort_key(edge.evidence),
+                        _json_sort_key(edge.decision_provenance),
+                    ),
+                )
             ],
             "diagnostics": [
                 diagnostic.to_dict()
@@ -270,8 +362,8 @@ class StructuralLayer:
                     self.diagnostics,
                     key=lambda diagnostic: (
                         diagnostic.code,
-                        diagnostic.evidence.path if diagnostic.evidence else "",
                         diagnostic.message,
+                        _evidence_sort_key(diagnostic.evidence),
                     ),
                 )
             ],
@@ -301,17 +393,42 @@ class AdjudicationLayer:
     decisions: tuple[Decision, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
 
+    def __post_init__(self) -> None:
+        candidates = _tuple(self.candidates)
+        decisions = _tuple(self.decisions)
+        diagnostics = _tuple(self.diagnostics)
+        _require_unique_ids(candidates, label="candidate")
+        _require_unique_ids(decisions, label="decision")
+        object.__setattr__(self, "candidates", candidates)
+        object.__setattr__(self, "decisions", decisions)
+        object.__setattr__(self, "diagnostics", diagnostics)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "candidates": [
                 candidate.to_dict()
                 for candidate in sorted(
-                    self.candidates, key=lambda candidate: candidate.id
+                    self.candidates,
+                    key=lambda candidate: (
+                        candidate.id,
+                        candidate.source,
+                        candidate.relation,
+                        _evidence_sort_key(candidate.evidence),
+                        tuple(sorted(candidate.options)),
+                    ),
                 )
             ],
             "decisions": [
                 decision.to_dict()
-                for decision in sorted(self.decisions, key=lambda decision: decision.id)
+                for decision in sorted(
+                    self.decisions,
+                    key=lambda decision: (
+                        decision.id,
+                        decision.candidate_id,
+                        decision.state,
+                        _json_sort_key(decision.provenance),
+                    ),
+                )
             ],
             "diagnostics": [
                 diagnostic.to_dict()
@@ -319,8 +436,8 @@ class AdjudicationLayer:
                     self.diagnostics,
                     key=lambda diagnostic: (
                         diagnostic.code,
-                        diagnostic.evidence.path if diagnostic.evidence else "",
                         diagnostic.message,
+                        _evidence_sort_key(diagnostic.evidence),
                     ),
                 )
             ],
