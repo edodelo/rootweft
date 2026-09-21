@@ -253,29 +253,47 @@ def test_windows_child_directory_swap_to_external_link_is_not_traversed(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows final handles are required")
-def test_windows_external_final_file_path_is_fail_closed(
+def test_windows_same_identity_symlink_escape_is_rejected_by_final_handle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Catches a final source-handle path outside the immutable root anchor."""
+    """Catches removal of final-handle containment after file identity passes."""
     root = tmp_path / "repo"
-    outside = tmp_path / "outside"
-    write(root / "inside.py", "inside = True\n")
-    outside_file = outside / "inside.py"
-    write(outside_file, "external = True\n")
-    original_final_path = scanner._windows_final_path
+    inside_file = root / "inside.py"
+    outside_file = tmp_path / "outside.py"
+    write(inside_file, "inside = True\n")
+    original_stat = inside_file.stat()
+    try:
+        outside_file.hardlink_to(inside_file)
+    except OSError as error:
+        if error.winerror not in {1, 5, 50, 1314}:
+            raise
+        pytest.skip(f"Windows hardlink creation unavailable: {error.winerror}")
+    original_open = scanner.os.open
+    swapped = False
 
-    def return_external_for_source_handle(handle: int) -> str | None:
-        final_path = original_final_path(handle)
-        if final_path is not None and final_path.casefold().endswith("inside.py"):
-            return str(outside_file)
-        return final_path
+    def swap_at_open(
+        path: str | Path, flags: int, *args: object, **kwargs: int
+    ) -> int:
+        nonlocal swapped
+        if Path(path) == inside_file and not swapped:
+            inside_file.unlink()
+            try:
+                inside_file.symlink_to(outside_file)
+            except OSError as error:
+                if error.winerror not in {1, 5, 50, 1314}:
+                    raise
+                pytest.skip(f"Windows symlink creation unavailable: {error.winerror}")
+            swapped = True
+        return original_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(
-        scanner, "_windows_final_path", return_external_for_source_handle
-    )
+    monkeypatch.setattr(scanner.os, "open", swap_at_open)
 
     result = scan_repository(root, ScanLimits())
 
+    assert swapped is True
+    assert inside_file.is_symlink()
+    assert inside_file.resolve(strict=True) == outside_file.resolve(strict=True)
+    assert os.path.samestat(original_stat, inside_file.stat())
     assert result.files == ()
     assert [item.code for item in result.diagnostics] == ["root_escape"]
 
