@@ -109,6 +109,38 @@ def test_windows_junction_is_not_traversed(tmp_path: Path) -> None:
     assert [item.code for item in result.diagnostics] == ["reparse_point_skipped"]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="root replacement is Windows-specific")
+def test_windows_root_replacement_cannot_reanchor_file_containment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches final-path containment being recalculated from a replaced root."""
+    root = tmp_path / "repo"
+    archived_root = tmp_path / "archived-root"
+    write(root / "inside.py", "inside = True\n")
+    original_open = scanner.os.open
+    replaced = False
+
+    def replace_root_at_open(
+        path: str | Path, flags: int, *args: object, **kwargs: int
+    ) -> int:
+        nonlocal replaced
+        if Path(path).name == "inside.py" and not replaced:
+            replaced = True
+            try:
+                root.rename(archived_root)
+                make_junction_or_skip(root, archived_root)
+            except PermissionError as error:
+                raise FileNotFoundError("root replacement prevented") from error
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(scanner.os, "open", replace_root_at_open)
+
+    result = scan_repository(root, ScanLimits())
+
+    assert result.files == ()
+    assert "inside.py" not in [item.path for item in result.files]
+
+
 def test_scanner_returns_sorted_posix_paths_and_decodes_utf8_bom(
     tmp_path: Path,
 ) -> None:
@@ -123,6 +155,18 @@ def test_scanner_returns_sorted_posix_paths_and_decodes_utf8_bom(
         ("nested/a.py", "answer = 42\n", sha256(bom_source).hexdigest()),
         ("z.py", "z = 1\n", sha256(b"z = 1\n").hexdigest()),
     ]
+
+
+def test_scanner_globally_sorts_a_file_after_its_same_prefix_directory(
+    tmp_path: Path,
+) -> None:
+    """Catches depth-first traversal leaking into the public result ordering."""
+    write(tmp_path / "foo.py", "file = True\n")
+    write(tmp_path / "foo/a.py", "nested = True\n")
+
+    result = scan_repository(tmp_path, ScanLimits())
+
+    assert [item.path for item in result.files] == ["foo.py", "foo/a.py"]
 
 
 def test_scanner_reports_binary_input_without_source_content(tmp_path: Path) -> None:
@@ -203,6 +247,45 @@ def test_scanner_counts_rejected_candidates_against_file_limit(tmp_path: Path) -
 
     assert result.files == ()
     assert [item.code for item in result.diagnostics] == ["binary_file", "max_files"]
+
+
+def test_scanner_stops_collecting_an_oversized_directory_at_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches eager directory sorting materializing entries past max_files."""
+    for index in range(10):
+        write(tmp_path / f"{index}.py", "item = True\n")
+    original_scandir = scanner.os.scandir
+    yielded = 0
+
+    class CountingScandir:
+        def __init__(self, path: str | Path) -> None:
+            self._context = original_scandir(path)
+
+        def __enter__(self) -> CountingScandir:
+            self._entries = iter(self._context.__enter__())
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._context.__exit__(*args)
+
+        def __iter__(self) -> CountingScandir:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            nonlocal yielded
+            yielded += 1
+            if yielded > 3:
+                raise AssertionError("scanner enumerated past its bounded limit")
+            return next(self._entries)
+
+    monkeypatch.setattr(scanner.os, "scandir", CountingScandir)
+
+    result = scan_repository(tmp_path, ScanLimits(max_files=1))
+
+    assert result.files == ()
+    assert [item.code for item in result.diagnostics] == ["max_files"]
+    assert yielded == 3
 
 
 def test_scanner_charges_binary_bytes_against_total_budget(tmp_path: Path) -> None:

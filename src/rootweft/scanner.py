@@ -129,6 +129,18 @@ class _FileCandidate:
     name: str | None = None
 
 
+@dataclass(frozen=True)
+class _WindowsRootAnchor:
+    handle: int
+    final_path: str
+
+
+@dataclass
+class _TraversalState:
+    max_directory_entries: int
+    exhausted: bool = False
+
+
 def scan_repository(
     root: Path,
     limits: ScanLimits,
@@ -157,52 +169,68 @@ def scan_repository(
     if not stat.S_ISDIR(root_mode):
         raise ValueError("scan root must be a directory")
 
-    files: list[ScannedFile] = []
     diagnostics: list[Diagnostic] = []
+    windows_anchor = _open_windows_root_anchor(canonical_root)
+    if os.name == "nt" and windows_anchor is None:
+        _add_diagnostic(diagnostics, "unsafe_root_primitive", "")
+        return ScanResult(diagnostics=tuple(diagnostics))
+
+    files: list[ScannedFile] = []
     total_bytes = 0
     candidate_count = 0
-
-    for candidate in _walk_files(canonical_root, extra_ignores, diagnostics):
-        candidate_count += 1
-        if candidate_count > limits.max_files:
-            _add_diagnostic(diagnostics, "max_files", candidate.path)
-            break
-        if candidate.expected_stat.st_size > limits.max_file_bytes:
-            _add_diagnostic(diagnostics, "max_file_bytes", candidate.path)
-            continue
-        remaining_bytes = limits.max_total_bytes - total_bytes
-        if candidate.expected_stat.st_size > remaining_bytes:
-            _add_diagnostic(diagnostics, "max_total_bytes", candidate.path)
-            break
-
-        raw = _read_regular_file(
-            candidate,
-            limits.max_file_bytes,
-            remaining_bytes,
+    state = _TraversalState(max_directory_entries=limits.max_files + 1)
+    try:
+        for candidate in _walk_files(
             canonical_root,
+            extra_ignores,
             diagnostics,
-        )
-        if raw is None:
-            continue
-        total_bytes += len(raw)
-        if b"\x00" in raw:
-            _add_diagnostic(diagnostics, "binary_file", candidate.path)
-            continue
-        try:
-            text = raw.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            _add_diagnostic(diagnostics, "invalid_encoding", candidate.path)
-            continue
+            state,
+            windows_anchor,
+        ):
+            candidate_count += 1
+            if candidate_count > limits.max_files:
+                _add_diagnostic(diagnostics, "max_files", candidate.path)
+                break
+            if candidate.expected_stat.st_size > limits.max_file_bytes:
+                _add_diagnostic(diagnostics, "max_file_bytes", candidate.path)
+                continue
+            remaining_bytes = limits.max_total_bytes - total_bytes
+            if candidate.expected_stat.st_size > remaining_bytes:
+                _add_diagnostic(diagnostics, "max_total_bytes", candidate.path)
+                break
 
-        files.append(
-            ScannedFile(
-                path=candidate.path,
-                language=_language_for(candidate.path),
-                text=text,
-                sha256=sha256(raw).hexdigest(),
+            raw = _read_regular_file(
+                candidate,
+                limits.max_file_bytes,
+                remaining_bytes,
+                windows_anchor,
+                diagnostics,
             )
-        )
+            if raw is None:
+                continue
+            total_bytes += len(raw)
+            if b"\x00" in raw:
+                _add_diagnostic(diagnostics, "binary_file", candidate.path)
+                continue
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                _add_diagnostic(diagnostics, "invalid_encoding", candidate.path)
+                continue
 
+            files.append(
+                ScannedFile(
+                    path=candidate.path,
+                    language=_language_for(candidate.path),
+                    text=text,
+                    sha256=sha256(raw).hexdigest(),
+                )
+            )
+    finally:
+        if windows_anchor is not None:
+            _close_windows_handle(windows_anchor.handle)
+
+    files.sort(key=lambda item: item.path)
     return ScanResult(files=tuple(files), diagnostics=tuple(diagnostics))
 
 
@@ -210,17 +238,23 @@ def _walk_files(
     root: Path,
     extra_ignores: tuple[str, ...],
     diagnostics: list[Diagnostic],
+    state: _TraversalState,
+    windows_anchor: _WindowsRootAnchor | None,
 ) -> Iterator[_FileCandidate]:
     if os.name == "nt":
+        if windows_anchor is None:
+            _add_diagnostic(diagnostics, "unsafe_root_primitive", "")
+            return
         root_stat = _lstat_directory(root, "", diagnostics)
         if root_stat is not None:
             yield from _walk_files_windows(
                 root,
-                root,
+                windows_anchor,
                 PurePosixPath("."),
                 root_stat,
                 extra_ignores,
                 diagnostics,
+                state,
             )
         return
 
@@ -239,7 +273,7 @@ def _walk_files(
             _add_diagnostic(diagnostics, "unreadable_directory", "")
             return
         yield from _walk_files_posix(
-            root_fd, PurePosixPath("."), extra_ignores, diagnostics
+            root_fd, PurePosixPath("."), extra_ignores, diagnostics, state
         )
     finally:
         os.close(root_fd)
@@ -250,10 +284,15 @@ def _walk_files_posix(
     relative_directory: PurePosixPath,
     extra_ignores: tuple[str, ...],
     diagnostics: list[Diagnostic],
+    state: _TraversalState,
 ) -> Iterator[_FileCandidate]:
+    if state.exhausted:
+        return
     try:
         with os.scandir(directory_fd) as entries:
-            ordered_entries = sorted(entries, key=lambda entry: entry.name)
+            ordered_entries = _bounded_sorted_entries(
+                entries, relative_directory, diagnostics, state
+            )
     except PermissionError:
         _add_diagnostic(
             diagnostics, "permission_denied", _display_path(relative_directory)
@@ -269,8 +308,12 @@ def _walk_files_posix(
             diagnostics, "unreadable_directory", _display_path(relative_directory)
         )
         return
+    if ordered_entries is None:
+        return
 
     for entry in ordered_entries:
+        if state.exhausted:
+            return
         relative = relative_directory / entry.name
         relative_path = _display_path(relative)
         if _is_ignored(relative, entry.name, extra_ignores):
@@ -315,7 +358,7 @@ def _walk_files_posix(
                     _add_diagnostic(diagnostics, "changed_directory", relative_path)
                     continue
                 yield from _walk_files_posix(
-                    child_fd, relative, extra_ignores, diagnostics
+                    child_fd, relative, extra_ignores, diagnostics, state
                 )
             finally:
                 os.close(child_fd)
@@ -332,13 +375,16 @@ def _walk_files_posix(
 
 def _walk_files_windows(
     directory: Path,
-    root: Path,
+    root_anchor: _WindowsRootAnchor,
     relative_directory: PurePosixPath,
     expected_stat: os.stat_result,
     extra_ignores: tuple[str, ...],
     diagnostics: list[Diagnostic],
+    state: _TraversalState,
 ) -> Iterator[_FileCandidate]:
-    if not _windows_path_is_within_root(directory, root):
+    if state.exhausted:
+        return
+    if not _windows_directory_is_within_anchor(directory, root_anchor):
         _add_diagnostic(
             diagnostics, "root_escape", _display_path(relative_directory)
         )
@@ -355,7 +401,9 @@ def _walk_files_windows(
         return
     try:
         with os.scandir(directory) as entries:
-            ordered_entries = sorted(entries, key=lambda entry: entry.name)
+            ordered_entries = _bounded_sorted_entries(
+                entries, relative_directory, diagnostics, state
+            )
     except PermissionError:
         _add_diagnostic(
             diagnostics, "permission_denied", _display_path(relative_directory)
@@ -371,10 +419,12 @@ def _walk_files_windows(
             diagnostics, "unreadable_directory", _display_path(relative_directory)
         )
         return
+    if ordered_entries is None:
+        return
     after = _lstat_directory(directory, _display_path(relative_directory), diagnostics)
     if after is None:
         return
-    if not _windows_path_is_within_root(directory, root):
+    if not _windows_directory_is_within_anchor(directory, root_anchor):
         _add_diagnostic(
             diagnostics, "root_escape", _display_path(relative_directory)
         )
@@ -386,6 +436,8 @@ def _walk_files_windows(
         return
 
     for entry in ordered_entries:
+        if state.exhausted:
+            return
         relative = relative_directory / entry.name
         relative_path = _display_path(relative)
         if _is_ignored(relative, entry.name, extra_ignores):
@@ -412,11 +464,12 @@ def _walk_files_windows(
             if child_stat is not None:
                 yield from _walk_files_windows(
                     child_path,
-                    root,
+                    root_anchor,
                     relative,
                     child_stat,
                     extra_ignores,
                     diagnostics,
+                    state,
                 )
         elif stat.S_ISREG(entry_stat.st_mode):
             file_path = Path(entry.path)
@@ -439,11 +492,29 @@ def _walk_files_windows(
             _add_diagnostic(diagnostics, "special_file", relative_path)
 
 
+def _bounded_sorted_entries(
+    entries: Iterator[os.DirEntry[str]],
+    relative_directory: PurePosixPath,
+    diagnostics: list[Diagnostic],
+    state: _TraversalState,
+) -> list[os.DirEntry[str]] | None:
+    collected: list[os.DirEntry[str]] = []
+    for entry in entries:
+        if len(collected) >= state.max_directory_entries:
+            state.exhausted = True
+            _add_diagnostic(
+                diagnostics, "max_files", _display_path(relative_directory)
+            )
+            return None
+        collected.append(entry)
+    return sorted(collected, key=lambda entry: entry.name)
+
+
 def _read_regular_file(
     candidate: _FileCandidate,
     max_file_bytes: int,
     remaining_bytes: int,
-    root: Path,
+    root_anchor: _WindowsRootAnchor | None,
     diagnostics: list[Diagnostic],
 ) -> bytes | None:
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
@@ -491,7 +562,10 @@ def _read_regular_file(
         if opened_stat.st_size > remaining_bytes:
             _add_diagnostic(diagnostics, "max_total_bytes", candidate.path)
             return None
-        if os.name == "nt" and not _windows_handle_is_within_root(descriptor, root):
+        if os.name == "nt" and (
+            root_anchor is None
+            or not _windows_handle_is_within_anchor(descriptor, root_anchor)
+        ):
             _add_diagnostic(diagnostics, "root_escape", candidate.path)
             return None
         with os.fdopen(descriptor, "rb", closefd=False) as source:
@@ -527,35 +601,124 @@ def _is_reparse_point(value: os.stat_result) -> bool:
     return bool(getattr(value, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT)
 
 
-def _windows_handle_is_within_root(descriptor: int, root: Path) -> bool:
-    """Validate the opened Windows handle's final target before source reads."""
+def _open_windows_root_anchor(root: Path) -> _WindowsRootAnchor | None:
+    if os.name != "nt":
+        return None
+    handle = _open_windows_path_handle(root, directory=True)
+    if handle is None:
+        return None
+    final_path = _windows_final_path(handle)
+    if final_path is None:
+        _close_windows_handle(handle)
+        return None
+    return _WindowsRootAnchor(handle, _normalise_windows_path(final_path))
+
+
+def _windows_directory_is_within_anchor(
+    directory: Path, anchor: _WindowsRootAnchor
+) -> bool:
+    handle = _open_windows_path_handle(directory, directory=True)
+    if handle is None:
+        return False
+    try:
+        final_path = _windows_final_path(handle)
+        return final_path is not None and _windows_path_is_within_anchor(
+            final_path, anchor
+        )
+    finally:
+        _close_windows_handle(handle)
+
+
+def _windows_handle_is_within_anchor(
+    descriptor: int, anchor: _WindowsRootAnchor
+) -> bool:
+    """Validate an opened source handle against the immutable root anchor."""
     if os.name != "nt":
         return True
-    import ctypes
     import msvcrt
 
-    buffer = ctypes.create_unicode_buffer(32_768)
-    length = ctypes.windll.kernel32.GetFinalPathNameByHandleW(
-        msvcrt.get_osfhandle(descriptor), buffer, len(buffer), 0
+    final_path = _windows_final_path(int(msvcrt.get_osfhandle(descriptor)))
+    return final_path is not None and _windows_path_is_within_anchor(
+        final_path, anchor
     )
+
+
+def _open_windows_path_handle(path: Path, *, directory: bool) -> int | None:
+    """Open a metadata handle without allowing deletion of the named object."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path),
+        0x80,  # FILE_READ_ATTRIBUTES
+        0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE (not FILE_SHARE_DELETE)
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000 if directory else 0,  # FILE_FLAG_BACKUP_SEMANTICS
+        None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle is None or handle == invalid:
+        return None
+    return int(handle)
+
+
+def _windows_final_path(handle: int) -> str | None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    get_final_path.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32_768)
+    length = get_final_path(handle, buffer, len(buffer), 0)
     if length == 0 or length >= len(buffer):
-        return False
-    final_path = buffer.value.removeprefix("\\\\?\\")
+        return None
+    return buffer.value
+
+
+def _close_windows_handle(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    close_handle(handle)
+
+
+def _windows_path_is_within_anchor(
+    final_path: str, anchor: _WindowsRootAnchor
+) -> bool:
     try:
         return os.path.commonpath(
-            (os.path.normcase(final_path), os.path.normcase(os.path.realpath(root)))
-        ) == os.path.normcase(os.path.realpath(root))
+            (_normalise_windows_path(final_path), anchor.final_path)
+        ) == anchor.final_path
     except ValueError:
         return False
 
 
-def _windows_path_is_within_root(path: Path, root: Path) -> bool:
-    try:
-        final_path = os.path.normcase(os.path.realpath(path))
-        final_root = os.path.normcase(os.path.realpath(root))
-        return os.path.commonpath((final_path, final_root)) == final_root
-    except (OSError, ValueError):
-        return False
+def _normalise_windows_path(path: str) -> str:
+    return os.path.normcase(path.removeprefix("\\\\?\\"))
 
 
 def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
