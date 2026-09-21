@@ -141,6 +141,145 @@ def test_windows_root_replacement_cannot_reanchor_file_containment(
     assert "inside.py" not in [item.path for item in result.files]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="root replacement is Windows-specific")
+def test_windows_root_handle_denies_rename_while_scan_is_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a root anchor opened with sharing that permits replacement."""
+    root = tmp_path / "repo"
+    archived_root = tmp_path / "archived-root"
+    write(root / "inside.py", "inside = True\n")
+    original_open = scanner.os.open
+    replacement_blocked = False
+
+    def attempt_rename_at_open(
+        path: str | Path, flags: int, *args: object, **kwargs: int
+    ) -> int:
+        nonlocal replacement_blocked
+        if Path(path).name == "inside.py":
+            try:
+                root.rename(archived_root)
+            except PermissionError:
+                replacement_blocked = True
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(scanner.os, "open", attempt_rename_at_open)
+
+    result = scan_repository(root, ScanLimits())
+
+    assert replacement_blocked is True
+    assert [(item.path, item.text) for item in result.files] == [
+        ("inside.py", "inside = True\n")
+    ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="file replacement is Windows-specific")
+def test_windows_file_swap_to_external_symlink_is_not_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a candidate file swap reading an external symlink target."""
+    root = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    target = outside / "inside.py"
+    write(root / "inside.py", "inside = True\n")
+    write(target, "external = True\n")
+    original_open = scanner.os.open
+    swapped = False
+
+    def swap_at_open(
+        path: str | Path, flags: int, *args: object, **kwargs: int
+    ) -> int:
+        nonlocal swapped
+        candidate = Path(path)
+        if candidate.name == "inside.py" and not swapped:
+            swapped = True
+            candidate.unlink()
+            make_symlink_or_skip(candidate, target)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(scanner.os, "open", swap_at_open)
+
+    result = scan_repository(root, ScanLimits())
+
+    assert result.files == ()
+    assert [item.code for item in result.diagnostics] == ["changed_file"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory replacement is Windows-specific")
+def test_windows_child_directory_swap_to_external_link_is_not_traversed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a post-enumeration child replacement reading outside source."""
+    root = tmp_path / "repo"
+    child = root / "child"
+    outside = tmp_path / "outside"
+    write(child / "inside.py", "inside = True\n")
+    write(outside / "external.py", "external = True\n")
+    original_scandir = scanner.os.scandir
+    swapped = False
+
+    class SwapAfterEnumeration:
+        def __init__(self, path: str | Path) -> None:
+            self._path = Path(path)
+            self._context = original_scandir(path)
+
+        def __enter__(self) -> SwapAfterEnumeration:
+            self._entries = self._context.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            nonlocal swapped
+            if self._path.name == "child" and not swapped:
+                swapped = True
+                for item in child.iterdir():
+                    item.unlink()
+                child.rmdir()
+                make_symlink_or_skip(child, outside)
+            self._context.__exit__(*args)
+
+        def __iter__(self) -> SwapAfterEnumeration:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            return next(self._entries)
+
+    monkeypatch.setattr(scanner.os, "scandir", SwapAfterEnumeration)
+
+    result = scan_repository(root, ScanLimits())
+
+    assert result.files == ()
+    assert "child/external.py" not in [item.path for item in result.files]
+    assert "symlink_skipped" in [item.code for item in result.diagnostics]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows final handles are required")
+def test_windows_external_final_file_path_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a final source-handle path outside the immutable root anchor."""
+    root = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    write(root / "inside.py", "inside = True\n")
+    outside_file = outside / "inside.py"
+    write(outside_file, "external = True\n")
+    original_final_path = scanner._windows_final_path
+
+    def return_external_for_source_handle(handle: int) -> str | None:
+        final_path = original_final_path(handle)
+        if final_path is not None and final_path.casefold().endswith("inside.py"):
+            return str(outside_file)
+        return final_path
+
+    monkeypatch.setattr(
+        scanner, "_windows_final_path", return_external_for_source_handle
+    )
+
+    result = scan_repository(root, ScanLimits())
+
+    assert result.files == ()
+    assert [item.code for item in result.diagnostics] == ["root_escape"]
+
+
 def test_scanner_returns_sorted_posix_paths_and_decodes_utf8_bom(
     tmp_path: Path,
 ) -> None:

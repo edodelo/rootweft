@@ -604,7 +604,7 @@ def _is_reparse_point(value: os.stat_result) -> bool:
 def _open_windows_root_anchor(root: Path) -> _WindowsRootAnchor | None:
     if os.name != "nt":
         return None
-    handle = _open_windows_path_handle(root, directory=True)
+    handle = _open_windows_path_handle(root, directory=True, lock_replacement=True)
     if handle is None:
         return None
     final_path = _windows_final_path(handle)
@@ -643,7 +643,9 @@ def _windows_handle_is_within_anchor(
     )
 
 
-def _open_windows_path_handle(path: Path, *, directory: bool) -> int | None:
+def _open_windows_path_handle(
+    path: Path, *, directory: bool, lock_replacement: bool = False
+) -> int | None:
     """Open a metadata handle without allowing deletion of the named object."""
     import ctypes
     from ctypes import wintypes
@@ -662,7 +664,8 @@ def _open_windows_path_handle(path: Path, *, directory: bool) -> int | None:
     create_file.restype = wintypes.HANDLE
     handle = create_file(
         str(path),
-        0x80,  # FILE_READ_ATTRIBUTES
+        0x80 | (0x10000 if lock_replacement else 0),
+        # FILE_READ_ATTRIBUTES; DELETE only locks the immutable root anchor.
         0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE (not FILE_SHARE_DELETE)
         None,
         3,  # OPEN_EXISTING
