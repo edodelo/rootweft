@@ -249,3 +249,104 @@ items.map(() => helper());
         (n.name, n.kind) for n in batch.nodes if n.kind not in {"file", "module"}
     ] == [("Box", "class")]
     assert [r.name for r in batch.references].count("helper") == 3
+
+
+def test_deep_valid_member_chain_does_not_depend_on_python_recursion_limit() -> None:
+    """Catches extraction crashing on a small valid file with deeply nested members."""
+    target = "root" + ".member" * 1100
+    batch = extract_javascript(scanned("deep.js", target + "();\n"))
+    assert not batch.diagnostics
+    assert [(r.name, r.dynamic) for r in batch.references] == [(target, False)]
+    StructuralLayer(nodes=batch.nodes, edges=batch.edges)
+
+
+@pytest.mark.parametrize("suffix", [".js", ".ts"])
+def test_sibling_block_bindings_have_distinct_stable_ids_and_reference_owners(
+    suffix: str,
+) -> None:
+    """Catches same-spelled lexical bindings being merged across sibling blocks."""
+    source = "{ const run = () => left(); }\n{ const run = () => right(); }\n"
+    batch = extract_javascript(scanned("blocks" + suffix, source))
+    shifted = extract_javascript(scanned("blocks" + suffix, "\n\n" + source))
+    functions = [n for n in batch.nodes if n.name == "run"]
+    assert len(functions) == 2
+    assert len({n.id for n in functions}) == 2
+    assert [(r.name, r.source_id) for r in batch.references] == [
+        ("left", functions[0].id),
+        ("right", functions[1].id),
+    ]
+    assert [n.id for n in batch.nodes] == [n.id for n in shifted.nodes]
+    StructuralLayer(nodes=batch.nodes, edges=batch.edges)
+
+
+def test_namespaces_separate_bindings_but_reopened_namespace_overloads_coalesce() -> (
+    None
+):
+    """Catches namespaces sharing one binding or reopened overloads being split."""
+    source = """namespace Left { export function run(x: string): void; }
+namespace Right { export function run() { right(); } }
+namespace Left { export function run(x: unknown) { left(); } }
+"""
+    batch = extract_javascript(scanned("names.ts", source))
+    shifted = extract_javascript(scanned("names.ts", "\n" + source))
+    functions = {n.qualified_name: n for n in batch.nodes if n.name == "run"}
+    assert set(functions) == {"names.Left.run", "names.Right.run"}
+    assert [(r.name, r.source_id) for r in batch.references] == [
+        ("right", functions["names.Right.run"].id),
+        ("left", functions["names.Left.run"].id),
+    ]
+    assert [n.id for n in batch.nodes] == [n.id for n in shifted.nodes]
+    StructuralLayer(nodes=batch.nodes, edges=batch.edges)
+
+
+def test_static_and_instance_methods_keep_separate_bindings_and_overloads() -> None:
+    """Catches static/instance methods and their local declarations sharing IDs."""
+    source = """class Box {
+  static run(x: string): void;
+  static run(x: unknown) { function local() { left(); } }
+  run(x: string): void;
+  run(x: unknown) { function local() { right(); } }
+}
+"""
+    batch = extract_javascript(scanned("methods.ts", source))
+    shifted = extract_javascript(scanned("methods.ts", "\n" + source))
+    methods = [n for n in batch.nodes if n.name == "run"]
+    locals_ = [n for n in batch.nodes if n.name == "local"]
+    assert len(methods) == len(locals_) == 2
+    assert len({n.id for n in methods + locals_}) == 4
+    assert [(r.name, r.source_id) for r in batch.references] == [
+        ("left", locals_[0].id),
+        ("right", locals_[1].id),
+    ]
+    assert {(e.source, e.target) for e in batch.edges} >= {
+        (methods[0].id, locals_[0].id),
+        (methods[1].id, locals_[1].id),
+    }
+    assert [n.id for n in batch.nodes] == [n.id for n in shifted.nodes]
+    StructuralLayer(nodes=batch.nodes, edges=batch.edges)
+
+
+@pytest.mark.parametrize("declarations", [100, 1000])
+def test_evidence_line_indexing_has_a_file_sized_work_budget(declarations: int) -> None:
+    """Catches rescanning the whole input for each declaration's evidence span."""
+
+    class MeasuredText(str):
+        scanned_characters = 0
+
+        def splitlines(self, keepends: bool = False) -> list[str]:
+            self.scanned_characters += len(self)
+            return super().splitlines(keepends)
+
+    source = MeasuredText(
+        "".join(f"function item{i}() {{}}\n" for i in range(declarations))
+    )
+    batch = extract_javascript(scanned("many.js", source))
+    functions = [n for n in batch.nodes if n.kind == "function"]
+    assert len(functions) == declarations
+    assert functions[0].evidence.start_line == 1
+    assert functions[-1].evidence.start_line == declarations
+    assert (
+        functions[0].metadata["evidence_fingerprint"]
+        == sha256(b"function item0() {}").hexdigest()
+    )
+    assert source.scanned_characters <= len(source) * 2

@@ -37,6 +37,20 @@ _STATIC_NAMES = {
 }
 
 
+@dataclass(frozen=True)
+class _BindingScope:
+    identity: str
+    qualified: str
+
+
+@dataclass(frozen=True)
+class _Scope:
+    binding: _BindingScope
+    variable: _BindingScope
+    body_id: int | None = None
+    callable_id: int | None = None
+
+
 def extract_javascript(file: ScannedFile) -> ExtractionBatch:
     """Parse one JS/JSX/MJS/CJS, TS, or TSX file with a fresh parser."""
     suffix = PurePosixPath(file.path).suffix.casefold()
@@ -81,14 +95,18 @@ def extract_javascript(file: ScannedFile) -> ExtractionBatch:
         extractor.whole_file,
         file_node,
     )
-    pending_nodes = [(child, module) for child in reversed(root.named_children)]
+    module_binding = _BindingScope(module.id, extractor.module_name)
+    scope = _Scope(module_binding, module_binding)
+    pending_nodes = [(child, module, scope) for child in reversed(root.named_children)]
     while pending_nodes:
-        syntax, parent = pending_nodes.pop()
-        symbol = extractor.declaration(syntax, parent)
+        syntax, parent, scope = pending_nodes.pop()
+        scope = extractor.lexical_scope(syntax, scope)
+        symbol = extractor.declaration(syntax, parent, scope)
         current = symbol or parent
+        scope = extractor.child_scope(syntax, symbol, scope)
         extractor.references_for(syntax, current)
         pending_nodes.extend(
-            (child, current) for child in reversed(syntax.named_children)
+            (child, current, scope) for child in reversed(syntax.named_children)
         )
     return ExtractionBatch(
         nodes=tuple(extractor.nodes),
@@ -105,7 +123,12 @@ class _Extractor:
     nodes: list[Node] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
     references: list[Reference] = field(default_factory=list)
-    symbols: dict[tuple[str, str], Node] = field(default_factory=dict)
+    symbols: dict[str, Node] = field(default_factory=dict)
+    lines: list[str] = field(init=False)
+    scope_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.lines = self.file.text.splitlines()
 
     @property
     def module_name(self) -> str:
@@ -113,7 +136,7 @@ class _Extractor:
 
     @property
     def whole_file(self) -> Evidence:
-        return Evidence(self.file.path, 1, max(1, len(self.file.text.splitlines())))
+        return Evidence(self.file.path, 1, max(1, len(self.lines)))
 
     def text(self, node: SyntaxNode) -> str:
         return self.source[node.start_byte : node.end_byte].decode("utf-8")
@@ -130,13 +153,15 @@ class _Extractor:
         qualified: str,
         evidence: Evidence,
         parent: Node | None = None,
+        *,
+        binding: tuple[str, ...] = (),
     ) -> Node:
-        key = kind, qualified
+        key = stable_id(self.language, self.file.path, kind, qualified, *binding)
         if key in self.symbols:
             return self.symbols[key]
-        lines = self.file.text.splitlines()[evidence.start_line - 1 : evidence.end_line]
+        lines = self.lines[evidence.start_line - 1 : evidence.end_line]
         symbol = Node(
-            id=stable_id(self.language, self.file.path, kind, qualified),
+            id=key,
             kind=kind,
             name=name,
             qualified_name=qualified,
@@ -160,7 +185,7 @@ class _Extractor:
             )
         return symbol
 
-    def declaration(self, node: SyntaxNode, parent: Node) -> Node | None:
+    def declaration(self, node: SyntaxNode, parent: Node, scope: _Scope) -> Node | None:
         kind: str | None = None
         name_node = node.child_by_field_name("name")
         name: str | None = None
@@ -195,12 +220,81 @@ class _Extractor:
             name = "default"
         if name is None:
             return None
+        binding = scope.binding
+        if (
+            node.type == "variable_declarator"
+            and node.parent is not None
+            and node.parent.type == "variable_declaration"
+        ):
+            binding = scope.variable
         qualified = (
             name
-            if kind == "class" and parent.kind == "module"
-            else f"{parent.qualified_name}.{name}"
+            if kind == "class" and binding.identity == self.nodes[1].id
+            else f"{binding.qualified}.{name}"
         )
-        return self.add_node(kind, name, qualified, self.evidence(node), parent)
+        member = (
+            ("static" if any(c.type == "static" for c in node.children) else "instance")
+            if kind == "method"
+            else ""
+        )
+        return self.add_node(
+            kind,
+            name,
+            qualified,
+            self.evidence(node),
+            parent,
+            binding=(binding.identity, member),
+        )
+
+    def lexical_scope(self, node: SyntaxNode, scope: _Scope) -> _Scope:
+        if node.type in {"internal_module", "module"}:
+            name = node.child_by_field_name("name")
+            if name is not None:
+                binding = _BindingScope(
+                    stable_id(scope.binding.identity, "namespace", self.text(name)),
+                    f"{scope.binding.qualified}.{self.text(name)}",
+                )
+                body = node.child_by_field_name("body")
+                return _Scope(binding, binding, body.id if body else None)
+        if node.type in {
+            "statement_block",
+            "for_statement",
+            "for_in_statement",
+            "catch_clause",
+            "switch_body",
+            "class_static_block",
+        }:
+            if node.id != scope.body_id:
+                binding = self.anonymous_binding(scope, "block")
+                variable = (
+                    binding if node.type == "class_static_block" else scope.variable
+                )
+                return _Scope(binding, variable)
+        return scope
+
+    def child_scope(
+        self, node: SyntaxNode, symbol: Node | None, scope: _Scope
+    ) -> _Scope:
+        if symbol is not None:
+            owner = node.child_by_field_name("value") or node
+            body = owner.child_by_field_name("body")
+            binding = _BindingScope(symbol.id, symbol.qualified_name or symbol.name)
+            return _Scope(binding, binding, body.id if body else None, owner.id)
+        if node.type in _FUNCTIONS | _FUNCTION_VALUES | {"method_definition", "class"}:
+            if node.id != scope.callable_id:
+                binding = self.anonymous_binding(scope, "anonymous")
+                body = node.child_by_field_name("body")
+                return _Scope(binding, binding, body.id if body else None, node.id)
+        return scope
+
+    def anonymous_binding(self, scope: _Scope, kind: str) -> _BindingScope:
+        key = scope.binding.identity, kind
+        ordinal = self.scope_counts.get(key, 0) + 1
+        self.scope_counts[key] = ordinal
+        return _BindingScope(
+            stable_id(scope.binding.identity, kind, str(ordinal)),
+            f"{scope.binding.qualified}.<{kind}:{ordinal}>",
+        )
 
     @staticmethod
     def default_export(node: SyntaxNode) -> bool:
@@ -255,25 +349,30 @@ class _Extractor:
         return self.text(node)[1:-1]
 
     def call_target(self, node: SyntaxNode) -> tuple[str, bool]:
-        if node.type in _STATIC_NAMES | {"this", "super"}:
-            return self.text(node), False
-        if node.type in {"member_expression", "subscript_expression"}:
-            base = node.child_by_field_name("object")
-            base_name, dynamic = (
-                self.call_target(base) if base else ("<computed>", True)
-            )
-            if node.type == "subscript_expression":
-                return f"{base_name}[...]", True
-            prop = node.child_by_field_name("property")
-            if prop is None:
-                return "<computed call>", True
-            optional = node.child_by_field_name("optional_chain") is not None
-            return f"{base_name}.{self.text(prop)}", dynamic or optional
-        if node.type == "call_expression":
-            callee = node.child_by_field_name("function")
-            name = self.call_target(callee)[0] if callee else "<computed>"
-            return f"{name}()", True
-        return "<computed call>", True
+        suffixes: list[str] = []
+        dynamic = False
+        current: SyntaxNode | None = node
+        while current is not None:
+            if current.type in _STATIC_NAMES | {"this", "super"}:
+                return self.text(current) + "".join(reversed(suffixes)), dynamic
+            if current.type in {"member_expression", "subscript_expression"}:
+                if current.type == "subscript_expression":
+                    suffixes.append("[...]")
+                    dynamic = True
+                else:
+                    prop = current.child_by_field_name("property")
+                    if prop is None:
+                        break
+                    suffixes.append(f".{self.text(prop)}")
+                    dynamic |= current.child_by_field_name("optional_chain") is not None
+                current = current.child_by_field_name("object")
+            elif current.type == "call_expression":
+                suffixes.append("()")
+                dynamic = True
+                current = current.child_by_field_name("function")
+            else:
+                break
+        return "<computed call>" + "".join(reversed(suffixes)), True
 
     def reference(
         self, name: str, relation: str, node: SyntaxNode, parent: Node, *, dynamic: bool

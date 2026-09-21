@@ -157,3 +157,16 @@ def test_escaped_backticks_are_prose_but_backslashes_inside_code_are_literal() -
         ("Foo", 1),
         ("Foo", 2),
     ]
+
+
+def test_masking_inline_code_cannot_create_a_heading_opener() -> None:
+    """Catches code masking turning ordinary prose into an ATX heading or crash."""
+    batch = extract_markdown(
+        scanned("`x`# Heading\n# Real\n`start\n# Hidden\nend`\n"),
+        frozenset({"Heading"}),
+    )
+    assert [n.name for n in batch.nodes if n.kind == "heading"] == ["Real"]
+    assert [(r.name, r.evidence.start_line) for r in batch.references] == [
+        ("Heading", 1)
+    ]
+    assert batch.references[0].source_id == batch.nodes[0].id

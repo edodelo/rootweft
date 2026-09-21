@@ -54,13 +54,16 @@ def extract_markdown(
     original_lines = file.text.splitlines()
     for line_number, line in enumerate(visible.splitlines(), start=1):
         heading = _HEADING.match(line)
-        if heading is not None:
+        original = _HEADING.match(original_lines[line_number - 1])
+        if (
+            heading is not None
+            and original is not None
+            and heading.span(1) == original.span(1)
+        ):
             level = len(heading[1])
             while parents[-1][0] >= level:
                 parents.pop()
             parent = parents[-1][1]
-            original = _HEADING.match(original_lines[line_number - 1])
-            assert original is not None
             name = re.sub(r"(?:^|[ \t]+)#+[ \t]*$", "", original[2] or "").strip()
             key = parent.id, name
             occurrences[key] += 1
