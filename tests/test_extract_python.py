@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 
 from rootweft.extract.python import extract_python
+from rootweft.models import StructuralLayer
 from rootweft.scanner import ScannedFile
 
 
@@ -208,6 +209,66 @@ def test_python_keeps_module_less_relative_import_prefixes() -> None:
         for reference in batch.references
         if reference.relation == "imports"
     ] == [".helper", "..util"]
+
+
+def test_python_coalesces_overloaded_module_function_for_graph_uniqueness() -> None:
+    """Catches overload declarations producing duplicate graph node or edge IDs."""
+    batch = extract_python(
+        scanned(
+            "mod.py",
+            "from typing import overload\n\n"
+            "@overload\n"
+            "def parse(value: int) -> int: ...\n\n"
+            "@overload\n"
+            "def parse(value: str) -> str: ...\n\n"
+            "def parse(value: int | str) -> int | str:\n"
+            "    return value\n",
+        )
+    )
+
+    declarations = [node for node in batch.nodes if node.qualified_name == "mod.parse"]
+    assert len(declarations) == 1
+    assert declarations[0].evidence.start_line == 4
+    StructuralLayer(nodes=batch.nodes, edges=batch.edges)
+
+
+def test_python_coalesces_overloaded_methods_for_graph_uniqueness() -> None:
+    """Catches class overloads emitting duplicate method nodes or contains edges."""
+    batch = extract_python(
+        scanned(
+            "mod.py",
+            "from typing import overload\n\n"
+            "class Parser:\n"
+            "    @overload\n"
+            "    def parse(self, value: int) -> int: ...\n\n"
+            "    @overload\n"
+            "    def parse(self, value: str) -> str: ...\n\n"
+            "    def parse(self, value: int | str) -> int | str:\n"
+            "        return value\n",
+        )
+    )
+
+    declarations = [
+        node for node in batch.nodes if node.qualified_name == "Parser.parse"
+    ]
+    assert len(declarations) == 1
+    assert declarations[0].evidence.start_line == 5
+    StructuralLayer(nodes=batch.nodes, edges=batch.edges)
+
+
+def test_python_coalesces_ordinary_same_scope_redefinitions() -> None:
+    """Catches non-overload redefinitions violating the graph uniqueness contract."""
+    batch = extract_python(
+        scanned(
+            "mod.py",
+            "def run():\n    return 1\n\ndef run():\n    return 2\n",
+        )
+    )
+
+    declarations = [node for node in batch.nodes if node.qualified_name == "mod.run"]
+    assert len(declarations) == 1
+    assert declarations[0].evidence.start_line == 1
+    StructuralLayer(nodes=batch.nodes, edges=batch.edges)
 
 
 def test_python_syntax_error_keeps_file_node_and_diagnostic() -> None:

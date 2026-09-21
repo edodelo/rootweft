@@ -34,6 +34,7 @@ class _PythonExtractor(ast.NodeVisitor):
     diagnostics: list[Diagnostic] = field(default_factory=list)
     _parents: list[Node] = field(default_factory=list)
     _declarations: list[_DeclarationScope] = field(default_factory=list)
+    _symbols: dict[tuple[str, str], Node] = field(default_factory=dict)
 
     @property
     def module_name(self) -> str:
@@ -153,10 +154,15 @@ class _PythonExtractor(ast.NodeVisitor):
         qualified_name: str,
         node: ast.AST,
     ) -> Node:
+        key = (kind, qualified_name)
+        existing = self._symbols.get(key)
+        if existing is not None:
+            return existing
         evidence = self._evidence(node)
         symbol = self._node(
             kind, name, qualified_name, evidence.start_line, evidence.end_line
         )
+        self._symbols[key] = symbol
         self.nodes.append(symbol)
         self._contains(self.current_source, symbol, evidence)
         return symbol
