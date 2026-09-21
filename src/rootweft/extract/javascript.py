@@ -259,9 +259,14 @@ class _Extractor:
                 pending = [name]
                 while pending:
                     component = pending.pop()
-                    if component.type == "nested_identifier":
+                    if component.type in {"nested_identifier", "member_expression"}:
                         pending.extend(reversed(component.named_children))
-                    elif component.type != "comment":
+                    elif component.type in {
+                        "identifier",
+                        "property_identifier",
+                        "type_identifier",
+                        "string",
+                    }:
                         part = self.text(component)
                         binding = _BindingScope(
                             stable_id(binding.identity, "namespace", part),

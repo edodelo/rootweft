@@ -218,6 +218,50 @@ class Parser {
     StructuralLayer(nodes=batch.nodes, edges=batch.edges)
 
 
+@pytest.mark.parametrize(
+    ("dotted", "nested", "qualified"),
+    [
+        (
+            "A.B.C",
+            "namespace A { namespace B { namespace C { BODY } } }",
+            "names.A.B.C.run",
+        ),
+        (
+            "A /* first */ . B /* second */ . C",
+            "namespace A { namespace B { namespace C { BODY } } }",
+            "names.A.B.C.run",
+        ),
+        (
+            "A.B /* middle */ .C.D",
+            "namespace A { namespace B { namespace C { namespace D { BODY } } } }",
+            "names.A.B.C.D.run",
+        ),
+    ],
+)
+def test_namespace_chains_coalesce_without_splitting_quoted_modules(
+    dotted: str, nested: str, qualified: str
+) -> None:
+    """Catches inner member-expression names remaining unnormalized namespace atoms."""
+    source = (
+        f"namespace {dotted} {{ export function run(x: string): void; }}\n"
+        + nested.replace("BODY", "export function run(x: unknown) { helper(); }")
+        + '\ndeclare module "A.B.C" { export function run(x: string): void; }\n'
+        + '\ndeclare module "A.B.C" { export function run(x: number): void; }\n'
+    )
+    batch = extract_javascript(scanned("names.ts", source))
+    assert not batch.diagnostics
+    functions = [n for n in batch.nodes if n.kind == "function"]
+    assert [n.qualified_name for n in functions] == [qualified, 'names."A.B.C".run']
+    assert len({n.id for n in functions}) == 2
+    assert [(r.name, r.source_id) for r in batch.references] == [
+        ("helper", functions[0].id)
+    ]
+    assert functions[0].evidence.start_line == 1
+    shifted = extract_javascript(scanned("names.ts", "\n\n" + source))
+    assert [n.id for n in batch.nodes] == [n.id for n in shifted.nodes]
+    StructuralLayer(nodes=batch.nodes, edges=batch.edges)
+
+
 def test_default_anonymous_class_and_generator_are_declarations() -> None:
     """Catches default anonymous exports and generator declarations being lost."""
     batch = extract_javascript(
