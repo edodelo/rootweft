@@ -66,6 +66,15 @@ def test_python_extracts_file_module_containment_and_imports() -> None:
     }
 
 
+def test_python_containment_edges_identify_the_parser_origin() -> None:
+    """Catches parser output being mislabeled as a downstream extractor decision."""
+    batch = extract_python(scanned("mod.py", "def run():\n    pass\n"))
+
+    assert {edge.origin for edge in batch.edges if edge.relation == "contains"} == {
+        "parser"
+    }
+
+
 def test_python_marks_computed_calls_and_dynamic_imports_unresolved() -> None:
     """Catches dynamic targets being emitted as falsely resolvable static references."""
     batch = extract_python(
@@ -105,6 +114,100 @@ def test_python_node_identifiers_ignore_line_number_changes() -> None:
         }
 
     assert identifiers(original) == identifiers(moved)
+
+
+def test_python_uses_every_enclosing_declaration_for_symbol_identity() -> None:
+    """Catches colliding local names or incorrect local-method classification."""
+    batch = extract_python(
+        scanned(
+            "pkg/mod.py",
+            "def first():\n"
+            "    def inner():\n"
+            "        pass\n\n"
+            "def second():\n"
+            "    def inner():\n"
+            "        pass\n\n"
+            "class Outer:\n"
+            "    def method(self):\n"
+            "        def local():\n"
+            "            pass\n"
+            "    class Nested:\n"
+            "        def child(self):\n"
+            "            pass\n",
+        )
+    )
+
+    nodes = {node.qualified_name: node for node in batch.nodes}
+    assert {
+        "pkg.mod.first.inner",
+        "pkg.mod.second.inner",
+        "Outer.method.local",
+        "Outer.Nested.child",
+    } <= nodes.keys()
+    assert nodes["Outer.method"].kind == "method"
+    assert nodes["Outer.method.local"].kind == "function"
+    assert nodes["Outer.Nested.child"].kind == "method"
+
+
+def test_python_normalizes_package_initializer_module_name() -> None:
+    """Catches package initializers being emitted as a fictional __init__ module."""
+    batch = extract_python(scanned("pkg/__init__.py", "value = 1\n"))
+
+    assert "pkg" in symbol_names(batch)
+    assert "pkg.__init__" not in symbol_names(batch)
+
+
+def test_python_marks_computed_attribute_calls_and_direct_dynamic_imports() -> None:
+    """Catches computed attribute bases or __import__ calls being treated as static."""
+    batch = extract_python(
+        scanned(
+            "dynamic.py",
+            "def run(obj, name, module, items):\n"
+            "    getattr(obj, name)()\n"
+            "    factory().run()\n"
+            "    items[0].run()\n"
+            "    __import__(module)\n",
+        )
+    )
+
+    dynamic = {
+        (reference.name, reference.relation)
+        for reference in batch.references
+        if reference.dynamic
+    }
+    assert {
+        ("getattr", "calls"),
+        ("factory().run", "calls"),
+        ("items[...].run", "calls"),
+        ("<dynamic import>", "imports"),
+    } <= dynamic
+    assert (
+        sum(
+            reference.name == "getattr" and reference.relation == "calls"
+            for reference in batch.references
+        )
+        == 1
+    )
+    assert (
+        sum(
+            reference.name == "<dynamic import>" and reference.relation == "imports"
+            for reference in batch.references
+        )
+        == 1
+    )
+
+
+def test_python_keeps_module_less_relative_import_prefixes() -> None:
+    """Catches an extra dot being inserted in module-less relative imports."""
+    batch = extract_python(
+        scanned("pkg/mod.py", "from . import helper\nfrom .. import util\n")
+    )
+
+    assert [
+        reference.name
+        for reference in batch.references
+        if reference.relation == "imports"
+    ] == [".helper", "..util"]
 
 
 def test_python_syntax_error_keeps_file_node_and_diagnostic() -> None:

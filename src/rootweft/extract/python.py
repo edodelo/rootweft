@@ -33,12 +33,16 @@ class _PythonExtractor(ast.NodeVisitor):
     references: list[Reference] = field(default_factory=list)
     diagnostics: list[Diagnostic] = field(default_factory=list)
     _parents: list[Node] = field(default_factory=list)
-    _classes: list[str] = field(default_factory=list)
+    _declarations: list[_DeclarationScope] = field(default_factory=list)
 
     @property
     def module_name(self) -> str:
         path = self.file.path
-        if path.endswith(".pyi"):
+        if path.endswith("/__init__.pyi"):
+            path = path[: -len("/__init__.pyi")]
+        elif path.endswith("/__init__.py"):
+            path = path[: -len("/__init__.py")]
+        elif path.endswith(".pyi"):
             path = path[:-4]
         elif path.endswith(".py"):
             path = path[:-3]
@@ -84,12 +88,12 @@ class _PythonExtractor(ast.NodeVisitor):
         )
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        qualified_name = ".".join((*self._classes, node.name))
+        qualified_name = self._qualified_name(node.name, kind="class")
         symbol = self._add_symbol("class", node.name, qualified_name, node)
         self._parents.append(symbol)
-        self._classes.append(node.name)
+        self._declarations.append(_DeclarationScope(symbol, "class"))
         self.generic_visit(node)
-        self._classes.pop()
+        self._declarations.pop()
         self._parents.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -99,14 +103,25 @@ class _PythonExtractor(ast.NodeVisitor):
         self._visit_function(node)
 
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        kind = "method" if self._classes else "function"
-        qualified_name = ".".join((*self._classes, node.name))
-        if not self._classes:
-            qualified_name = f"{self.module_name}.{node.name}"
+        kind = (
+            "method"
+            if self._declarations and self._declarations[-1].kind == "class"
+            else "function"
+        )
+        qualified_name = self._qualified_name(node.name, kind=kind)
         symbol = self._add_symbol(kind, node.name, qualified_name, node)
         self._parents.append(symbol)
+        self._declarations.append(_DeclarationScope(symbol, kind))
         self.generic_visit(node)
+        self._declarations.pop()
         self._parents.pop()
+
+    def _qualified_name(self, name: str, *, kind: str) -> str:
+        if self._declarations:
+            return f"{self._declarations[-1].node.qualified_name}.{name}"
+        if kind == "class":
+            return name
+        return f"{self.module_name}.{name}"
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -115,7 +130,7 @@ class _PythonExtractor(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         prefix = "." * node.level + (node.module or "")
         for alias in node.names:
-            name = f"{prefix}.{alias.name}" if prefix else alias.name
+            name = f"{prefix}.{alias.name}" if node.module else f"{prefix}{alias.name}"
             self._reference(name, "imports", node, dynamic=False)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -126,7 +141,10 @@ class _PythonExtractor(ast.NodeVisitor):
         else:
             name, dynamic = self._call_target(node.func)
             self._reference(name, "calls", node, dynamic=dynamic)
-        self.generic_visit(node)
+        if self._is_getattr_wrapper(node.func):
+            self._visit_getattr_wrapper_children(node)
+        else:
+            self.generic_visit(node)
 
     def _add_symbol(
         self,
@@ -165,7 +183,7 @@ class _PythonExtractor(ast.NodeVisitor):
                 source=source.id,
                 target=target.id,
                 relation="contains",
-                origin="extractor",
+                origin="parser",
                 status="accepted",
                 evidence=evidence,
             )
@@ -193,7 +211,8 @@ class _PythonExtractor(ast.NodeVisitor):
         return "\n".join(self.file.text.splitlines()[start_line - 1 : end_line])
 
     def _dynamic_import_name(self, node: ast.Call) -> tuple[str, bool] | None:
-        if self._attribute_name(node.func) != "importlib.import_module":
+        callee = self._attribute_name(node.func)
+        if callee not in {"importlib.import_module", "__import__"}:
             return None
         if (
             node.args
@@ -207,7 +226,12 @@ class _PythonExtractor(ast.NodeVisitor):
         if isinstance(node, ast.Name):
             return node.id, node.id == "getattr"
         if isinstance(node, ast.Attribute):
-            return self._attribute_name(node) or "<computed call>", False
+            name = self._attribute_name(node)
+            return (
+                (name, False)
+                if name is not None
+                else (self._expression_name(node), True)
+            )
         if isinstance(node, ast.Subscript):
             base = self._attribute_name(node.value) or "<computed>"
             return f"{base}[...]", True
@@ -219,6 +243,32 @@ class _PythonExtractor(ast.NodeVisitor):
             return "getattr", True
         return "<computed call>", True
 
+    def _is_getattr_wrapper(self, node: ast.expr) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+        )
+
+    def _visit_getattr_wrapper_children(self, node: ast.Call) -> None:
+        getter = node.func
+        assert isinstance(getter, ast.Call)
+        for child in (*getter.args, *(keyword.value for keyword in getter.keywords)):
+            self.visit(child)
+        for child in (*node.args, *(keyword.value for keyword in node.keywords)):
+            self.visit(child)
+
+    def _expression_name(self, node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return f"{self._expression_name(node.value)}.{node.attr}"
+        if isinstance(node, ast.Subscript):
+            return f"{self._expression_name(node.value)}[...]"
+        if isinstance(node, ast.Call):
+            return f"{self._expression_name(node.func)}()"
+        return "<computed>"
+
     def _attribute_name(self, node: ast.AST) -> str | None:
         if isinstance(node, ast.Name):
             return node.id
@@ -226,3 +276,9 @@ class _PythonExtractor(ast.NodeVisitor):
             parent = self._attribute_name(node.value)
             return f"{parent}.{node.attr}" if parent else None
         return None
+
+
+@dataclass(frozen=True)
+class _DeclarationScope:
+    node: Node
+    kind: str
