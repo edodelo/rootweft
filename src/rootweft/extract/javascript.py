@@ -126,6 +126,7 @@ class _Extractor:
     symbols: dict[str, Node] = field(default_factory=dict)
     lines: list[str] = field(init=False)
     scope_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    fingerprints: dict[Evidence, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.lines = self.file.text.splitlines()
@@ -159,7 +160,9 @@ class _Extractor:
         key = stable_id(self.language, self.file.path, kind, qualified, *binding)
         if key in self.symbols:
             return self.symbols[key]
-        lines = self.lines[evidence.start_line - 1 : evidence.end_line]
+        if evidence not in self.fingerprints:
+            lines = self.lines[evidence.start_line - 1 : evidence.end_line]
+            self.fingerprints[evidence] = evidence_fingerprint("\n".join(lines))
         symbol = Node(
             id=key,
             kind=kind,
@@ -167,7 +170,7 @@ class _Extractor:
             qualified_name=qualified,
             language=self.language,
             evidence=evidence,
-            metadata={"evidence_fingerprint": evidence_fingerprint("\n".join(lines))},
+            metadata={"evidence_fingerprint": self.fingerprints[evidence]},
         )
         self.symbols[key] = symbol
         self.nodes.append(symbol)
@@ -250,10 +253,20 @@ class _Extractor:
         if node.type in {"internal_module", "module"}:
             name = node.child_by_field_name("name")
             if name is not None:
-                binding = _BindingScope(
-                    stable_id(scope.binding.identity, "namespace", self.text(name)),
-                    f"{scope.binding.qualified}.{self.text(name)}",
-                )
+                binding = scope.binding
+                # Walk identifier components so dotted and nested declarations
+                # agree, ignoring whitespace/comments but preserving quoted modules.
+                pending = [name]
+                while pending:
+                    component = pending.pop()
+                    if component.type == "nested_identifier":
+                        pending.extend(reversed(component.named_children))
+                    elif component.type != "comment":
+                        part = self.text(component)
+                        binding = _BindingScope(
+                            stable_id(binding.identity, "namespace", part),
+                            f"{binding.qualified}.{part}",
+                        )
                 body = node.child_by_field_name("body")
                 return _Scope(binding, binding, body.id if body else None)
         if node.type in {

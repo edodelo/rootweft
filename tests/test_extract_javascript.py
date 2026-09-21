@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import rootweft.extract.javascript as javascript
 from rootweft.extract.javascript import extract_javascript
 from rootweft.models import StructuralLayer
 from rootweft.scanner import ScannedFile
@@ -350,3 +351,60 @@ def test_evidence_line_indexing_has_a_file_sized_work_budget(declarations: int) 
         == sha256(b"function item0() {}").hexdigest()
     )
     assert source.scanned_characters <= len(source) * 2
+
+
+@pytest.mark.parametrize("declarations", [100, 1000])
+def test_minified_evidence_hashing_has_a_linear_input_budget(
+    declarations: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches rehashing a complete minified line for each declaration on that line."""
+    real_fingerprint = javascript.evidence_fingerprint
+    hashed_characters = 0
+
+    def measured_fingerprint(text: str) -> str:
+        nonlocal hashed_characters
+        hashed_characters += len(text)
+        return real_fingerprint(text)
+
+    monkeypatch.setattr(javascript, "evidence_fingerprint", measured_fingerprint)
+    source = "".join(f"function item{i}() {{}}" for i in range(declarations))
+    batch = extract_javascript(scanned("minified.js", source))
+    assert len([n for n in batch.nodes if n.kind == "function"]) == declarations
+    assert {(n.evidence.start_line, n.evidence.end_line) for n in batch.nodes} == {
+        (1, 1)
+    }
+    assert {n.metadata["evidence_fingerprint"] for n in batch.nodes} == {
+        sha256(source.encode()).hexdigest()
+    }
+    StructuralLayer(nodes=batch.nodes, edges=batch.edges)
+    assert hashed_characters <= len(source) + 4 * declarations
+
+
+@pytest.mark.parametrize("namespace", ["A.B", "A . B", "A /* comment */ . B"])
+def test_dotted_and_nested_namespaces_share_one_overloaded_binding(
+    namespace: str,
+) -> None:
+    """Catches equivalent namespace syntax giving an overload two logical IDs."""
+    source = (
+        f"namespace {namespace} {{ export function run(x: string): void; }}\n"
+        "namespace A { export namespace B { "
+        "export function run(x: unknown) { helper(); } } }\n"
+        "namespace A { export function run() { first(); } }\n"
+        "namespace B { export function run() { second(); } }\n"
+    )
+    batch = extract_javascript(scanned("names.ts", source))
+    functions = [n for n in batch.nodes if n.kind == "function"]
+    assert not batch.diagnostics
+    assert [n.qualified_name for n in functions] == [
+        "names.A.B.run",
+        "names.A.run",
+        "names.B.run",
+    ]
+    assert [(r.name, r.source_id) for r in batch.references] == [
+        ("helper", functions[0].id),
+        ("first", functions[1].id),
+        ("second", functions[2].id),
+    ]
+    shifted = extract_javascript(scanned("names.ts", "\n" + source))
+    assert [n.id for n in batch.nodes] == [n.id for n in shifted.nodes]
+    StructuralLayer(nodes=batch.nodes, edges=batch.edges)
