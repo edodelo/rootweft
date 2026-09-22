@@ -118,7 +118,15 @@ def _matches(source: Node, ref: Reference, nodes: tuple[Node, ...]) -> tuple[Nod
         if node.kind in {"function", "method", "class"}
         and (ref.relation == "mentions" or node.language == source.language)
         and (node.name == ref.name or node.qualified_name == ref.name)
-        and (node.id != source.id or ref.relation == "calls")
+        and (
+            node.id != source.id
+            or (
+                ref.relation == "calls"
+                and source.language == "python"
+                and source.kind == "function"
+                and ref.name == source.name
+            )
+        )
     )
     if ref.relation == "mentions":
         return viable
