@@ -11,3 +11,11 @@ class IncompatibleSchemaError(GraphError):
 
 class CorruptGraphError(GraphError):
     """Raised when an artifact cannot be decoded as a valid graph."""
+
+
+class NodeNotFoundError(GraphError):
+    """Raised when a query names a node absent from the graph."""
+
+
+class EdgeNotFoundError(GraphError):
+    """Raised when a query names an edge absent from the graph."""

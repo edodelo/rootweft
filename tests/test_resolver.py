@@ -4,7 +4,9 @@ from rootweft.resolver import resolve_references
 
 
 def node(path: str, kind: str, name: str, qualified: str) -> Node:
-    return Node(f"{path}:{kind}:{name}", kind, name, qualified, "python", Evidence(path, 1, 1))
+    return Node(
+        f"{path}:{kind}:{name}", kind, name, qualified, "python", Evidence(path, 1, 1)
+    )
 
 
 def test_exact_same_file_call_and_explicit_import_are_accepted() -> None:
@@ -28,7 +30,11 @@ def test_exact_same_file_call_and_explicit_import_are_accepted() -> None:
 
 def test_ambiguous_cross_file_call_is_bounded_and_stable() -> None:
     source = node("app.py", "module", "app", "app")
-    helpers = (node("a.py", "function", "helper", "a.helper"), node("b.py", "function", "helper", "b.helper"), node("c.py", "function", "helper", "c.helper"))
+    helpers = (
+        node("a.py", "function", "helper", "a.helper"),
+        node("b.py", "function", "helper", "b.helper"),
+        node("c.py", "function", "helper", "c.helper"),
+    )
     ref = Reference(source.id, "helper", "calls", Evidence("app.py", 5, 5))
     edges, candidates = resolve_references((source, *helpers), (ref,), max_candidates=2)
     assert edges == ()
@@ -49,6 +55,59 @@ def test_dynamic_and_unbound_references_do_not_become_edges() -> None:
 def test_repeated_calls_have_distinct_edge_ids() -> None:
     source = node("app.py", "module", "app", "app")
     target = node("app.py", "function", "helper", "app.helper")
-    refs = (Reference(source.id, "helper", "calls", Evidence("app.py", 2, 2)), Reference(source.id, "helper", "calls", Evidence("app.py", 3, 3)))
+    refs = (
+        Reference(source.id, "helper", "calls", Evidence("app.py", 2, 2)),
+        Reference(source.id, "helper", "calls", Evidence("app.py", 3, 3)),
+    )
     edges, _ = resolve_references((source, target), refs)
     assert len({edge.id for edge in edges}) == 2
+
+
+def test_cross_language_names_are_not_guessed() -> None:
+    source = node("app.py", "module", "app", "app")
+    target = Node(
+        "web:helper",
+        "function",
+        "helper",
+        "web.helper",
+        "typescript",
+        Evidence("web.ts", 1, 1),
+    )
+    ref = Reference(source.id, "helper", "calls", Evidence("app.py", 2, 2))
+    assert resolve_references((source, target), (ref,)) == ((), ())
+
+
+def test_unique_cross_file_call_is_not_accepted_without_binding() -> None:
+    source = node("app.py", "module", "app", "app")
+    target = node("lib.py", "function", "helper", "lib.helper")
+    ref = Reference(source.id, "helper", "calls", Evidence("app.py", 2, 2))
+    edges, _ = resolve_references((source, target), (ref,))
+    assert edges == ()
+
+
+def test_external_bindings_keep_import_language_distinct() -> None:
+    source = node("app.py", "module", "app", "app")
+    python_external = Node(
+        "python:ext",
+        "external",
+        "pkg",
+        "pkg",
+        "external",
+        Evidence("ext.py", 1, 1),
+        {"import_language": "python"},
+    )
+    js_external = Node(
+        "js:ext",
+        "external",
+        "pkg",
+        "pkg",
+        "external",
+        Evidence("ext.ts", 1, 1),
+        {"import_language": "typescript"},
+    )
+    ref = Reference(source.id, "pkg", "imports", Evidence("app.py", 2, 2))
+    edges, candidates = resolve_references(
+        (source, python_external, js_external), (ref,)
+    )
+    assert [edge.target for edge in edges] == [python_external.id]
+    assert candidates == ()

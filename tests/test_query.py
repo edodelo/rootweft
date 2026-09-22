@@ -7,20 +7,29 @@ from rootweft.pipeline import BuildOptions, build_structural_graph
 from rootweft.query import GraphIndex
 from rootweft.scanner import ScanLimits
 
-
 SAMPLE = Path(__file__).resolve().parents[1] / "examples" / "sample_repo"
 
 
 def test_queries_identify_layer_and_are_bounded() -> None:
-    index = GraphIndex.from_document(build_structural_graph(BuildOptions(SAMPLE, ScanLimits())))
+    index = GraphIndex.from_document(
+        build_structural_graph(BuildOptions(SAMPLE, ScanLimits()))
+    )
     found = index.search_nodes("HELPER", limit=2)
     assert found["layer"] == "structural"
     assert 0 < len(found["nodes"]) <= 2
-    source = next(node for node in index.document.structural.nodes if node.kind == "module" and node.name == "app")
+    source = next(
+        node
+        for node in index.document.structural.nodes
+        if node.kind == "function" and node.name == "main"
+    )
     neighbors = index.neighbors(source.id, limit=2)
     assert neighbors["layer"] == "structural"
     assert len(neighbors["edges"]) <= 2
-    target = next(edge.target for edge in index.document.structural.edges if edge.source == source.id and edge.relation == "calls")
+    target = next(
+        edge.target
+        for edge in index.document.structural.edges
+        if edge.source == source.id and edge.relation == "calls"
+    )
     path = index.shortest_path(source.id, target, max_depth=3)
     assert path["layer"] == "structural"
     assert len(path["edges"]) == 1
@@ -30,7 +39,9 @@ def test_queries_identify_layer_and_are_bounded() -> None:
 
 
 def test_missing_ids_differ_from_empty_results() -> None:
-    index = GraphIndex.from_document(build_structural_graph(BuildOptions(SAMPLE, ScanLimits())))
+    index = GraphIndex.from_document(
+        build_structural_graph(BuildOptions(SAMPLE, ScanLimits()))
+    )
     assert index.search_nodes("nonexistent-pattern")["nodes"] == []
     with pytest.raises(NodeNotFoundError):
         index.neighbors("missing")
