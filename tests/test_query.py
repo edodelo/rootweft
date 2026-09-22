@@ -47,3 +47,23 @@ def test_missing_ids_differ_from_empty_results() -> None:
         index.neighbors("missing")
     with pytest.raises(EdgeNotFoundError):
         index.explain_edge("missing")
+
+
+def test_recursive_cycle_and_pagination_are_bounded(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("def helper():\n    helper()\n", encoding="utf-8")
+    index = GraphIndex.from_document(
+        build_structural_graph(BuildOptions(tmp_path, ScanLimits()))
+    )
+    helper = next(
+        node for node in index.document.structural.nodes if node.name == "helper"
+    )
+    assert index.shortest_path(helper.id, helper.id, max_depth=0)["edges"] == []
+    assert index.neighbors(helper.id, relation="calls")["total"] == 1
+    assert (
+        index.search_nodes("", limit=1, offset=1)["nodes"]
+        != index.search_nodes("", limit=1, offset=0)["nodes"]
+    )
+    with pytest.raises(ValueError, match="max_depth"):
+        index.shortest_path(helper.id, helper.id, max_depth=33)
+    with pytest.raises(ValueError, match="limit"):
+        index.neighbors(helper.id, limit=101)

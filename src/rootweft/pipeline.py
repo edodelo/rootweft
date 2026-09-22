@@ -19,7 +19,7 @@ from rootweft.models import (
     Node,
     StructuralLayer,
 )
-from rootweft.resolver import normalized_import_name, resolve_references
+from rootweft.resolver import internal_import_targets, resolve_references
 from rootweft.scanner import ScanLimits, ScannedFile, scan_repository
 
 
@@ -142,14 +142,7 @@ def _append_batch(
 def _add_external_nodes(
     nodes: list[Node], refs: Iterable[Reference], budget: GraphLimits
 ) -> None:
-    modules = {
-        (node.language, node.qualified_name) for node in nodes if node.kind == "module"
-    }
-    qualified = {
-        (node.language, node.qualified_name)
-        for node in nodes
-        if node.kind in {"function", "class"}
-    }
+    internal_nodes = tuple(nodes)
     sources = {node.id: node for node in nodes}
     external: set[tuple[str, str]] = set()
     for ref in refs:
@@ -157,10 +150,9 @@ def _add_external_nodes(
             continue
         source = sources[ref.source_id]
         language = source.language
-        normalized = normalized_import_name(source, ref.name)
         if ref.name.startswith((".", "../")):
             continue
-        if (language, normalized) not in modules | qualified:
+        if not internal_import_targets(source, ref, internal_nodes):
             external.add((language, ref.name))
     for language, name in sorted(external):
         source_path = f"<external>/{language}"

@@ -21,6 +21,7 @@ def extract_python(file: ScannedFile) -> ExtractionBatch:
         extractor.add_syntax_error(error)
         return extractor.batch()
     extractor.add_module()
+    extractor._module_shadowed = _module_rebindings(tree)
     extractor.visit(tree)
     return extractor.batch()
 
@@ -34,6 +35,8 @@ class _PythonExtractor(ast.NodeVisitor):
     diagnostics: list[Diagnostic] = field(default_factory=list)
     _parents: list[Node] = field(default_factory=list)
     _declarations: list[_DeclarationScope] = field(default_factory=list)
+    _scope_bindings: list[frozenset[str]] = field(default_factory=list)
+    _module_shadowed: frozenset[str] = frozenset()
     _symbols: dict[tuple[str, str], Node] = field(default_factory=dict)
 
     @property
@@ -103,6 +106,15 @@ class _PythonExtractor(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._visit_function(node)
 
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        collector = _BindingCollector()
+        collector.visit(node.body)
+        self._scope_bindings.append(
+            frozenset(_parameter_names(node.args) | collector.bound)
+        )
+        self.generic_visit(node)
+        self._scope_bindings.pop()
+
     def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         kind = (
             "method"
@@ -113,7 +125,9 @@ class _PythonExtractor(ast.NodeVisitor):
         symbol = self._add_symbol(kind, node.name, qualified_name, node)
         self._parents.append(symbol)
         self._declarations.append(_DeclarationScope(symbol, kind))
+        self._scope_bindings.append(_function_bindings(node))
         self.generic_visit(node)
+        self._scope_bindings.pop()
         self._declarations.pop()
         self._parents.pop()
 
@@ -132,7 +146,13 @@ class _PythonExtractor(ast.NodeVisitor):
         prefix = "." * node.level + (node.module or "")
         for alias in node.names:
             name = f"{prefix}.{alias.name}" if node.module else f"{prefix}{alias.name}"
-            self._reference(name, "imports", node, dynamic=False)
+            self._reference(
+                name,
+                "imports",
+                node,
+                dynamic=alias.name == "*",
+                import_kind="symbol",
+            )
 
     def visit_Call(self, node: ast.Call) -> None:
         dynamic_import = self._dynamic_import_name(node)
@@ -141,7 +161,12 @@ class _PythonExtractor(ast.NodeVisitor):
             self._reference(name, "imports", node, dynamic=dynamic)
         else:
             name, dynamic = self._call_target(node.func)
-            self._reference(name, "calls", node, dynamic=dynamic)
+            root_name = _callee_root_name(node.func)
+            shadowed = root_name is not None and (
+                root_name in self._module_shadowed
+                or any(root_name in scope for scope in self._scope_bindings)
+            )
+            self._reference(name, "calls", node, dynamic=dynamic, shadowed=shadowed)
         if self._is_getattr_wrapper(node.func):
             self._visit_getattr_wrapper_children(node)
         else:
@@ -196,7 +221,14 @@ class _PythonExtractor(ast.NodeVisitor):
         )
 
     def _reference(
-        self, name: str, relation: str, node: ast.AST, *, dynamic: bool
+        self,
+        name: str,
+        relation: str,
+        node: ast.AST,
+        *,
+        dynamic: bool,
+        import_kind: str = "module",
+        shadowed: bool = False,
     ) -> None:
         self.references.append(
             Reference(
@@ -205,6 +237,8 @@ class _PythonExtractor(ast.NodeVisitor):
                 relation=relation,
                 evidence=self._evidence(node),
                 dynamic=dynamic,
+                import_kind=import_kind,
+                shadowed=shadowed,
             )
         )
 
@@ -288,3 +322,90 @@ class _PythonExtractor(ast.NodeVisitor):
 class _DeclarationScope:
     node: Node
     kind: str
+
+
+def _function_bindings(node: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
+    """Names assigned within a Python function's lexical scope."""
+    collector = _BindingCollector()
+    for statement in node.body:
+        collector.visit(statement)
+    return frozenset(
+        (_parameter_names(node.args) | collector.bound) - collector.global_names
+    )
+
+
+def _parameter_names(args: ast.arguments) -> set[str]:
+    parameters = {
+        argument.arg for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs)
+    }
+    if args.vararg is not None:
+        parameters.add(args.vararg.arg)
+    if args.kwarg is not None:
+        parameters.add(args.kwarg.arg)
+    return parameters
+
+
+def _module_rebindings(tree: ast.Module) -> frozenset[str]:
+    collector = _ModuleBindingCollector()
+    for statement in tree.body:
+        collector.visit(statement)
+    return frozenset(collector.bound)
+
+
+def _callee_root_name(node: ast.expr) -> str | None:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+class _BindingCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.bound: set[str] = set()
+        self.global_names: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Store):
+            self.bound.add(node.id)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.bound.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.bound.add(node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.bound.add(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.bound.add(alias.asname or alias.name.split(".", 1)[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            if alias.name != "*":
+                self.bound.add(alias.asname or alias.name)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self.bound.add(node.name)
+        self.generic_visit(node)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.global_names.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.bound.update(node.names)
+
+
+class _ModuleBindingCollector(_BindingCollector):
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return

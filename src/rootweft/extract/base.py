@@ -16,6 +16,8 @@ class Reference:
     relation: str
     evidence: Evidence
     dynamic: bool = False
+    import_kind: str = "module"
+    shadowed: bool = False
 
 
 @dataclass(frozen=True)

@@ -97,33 +97,28 @@ def resolve_references(
 
 def _matches(source: Node, ref: Reference, nodes: tuple[Node, ...]) -> tuple[Node, ...]:
     if ref.relation == "imports":
-        normalized = normalized_import_name(source, ref.name)
-        # An import names a module or explicit qualified symbol, never a bare
-        # symbol guessed from a different file.
+        internal = internal_import_targets(source, ref, nodes)
+        if internal:
+            return internal
         return tuple(
             node
             for node in nodes
             if node.id != source.id
-            and (
-                node.language == source.language
-                or (
-                    node.kind == "external"
-                    and node.metadata.get("import_language") == source.language
-                )
-            )
-            and node.qualified_name
-            == (ref.name if node.kind == "external" else normalized)
-            and node.kind in {"module", "external", "function", "class"}
+            and node.kind == "external"
+            and node.metadata.get("import_language") == source.language
+            and node.qualified_name == ref.name
         )
     if ref.relation not in {"calls", "mentions", "references"}:
+        return ()
+    if ref.relation == "calls" and ref.shadowed:
         return ()
     viable = tuple(
         node
         for node in nodes
-        if node.id != source.id
-        and node.kind in {"function", "method", "class"}
+        if node.kind in {"function", "method", "class"}
         and (ref.relation == "mentions" or node.language == source.language)
         and (node.name == ref.name or node.qualified_name == ref.name)
+        and (node.id != source.id or ref.relation == "calls")
     )
     if ref.relation == "mentions":
         return viable
@@ -147,6 +142,47 @@ def _matches(source: Node, ref: Reference, nodes: tuple[Node, ...]) -> tuple[Nod
     return viable if len(viable) > 1 else ()
 
 
+def internal_import_targets(
+    source: Node, ref: Reference, nodes: Iterable[Node]
+) -> tuple[Node, ...]:
+    """Find import targets with the same rules used by external classification."""
+    normalized = normalized_import_name(source, ref.name)
+    local_nodes = tuple(node for node in nodes if node.language == source.language)
+    if ref.import_kind == "module":
+        return tuple(
+            node
+            for node in local_nodes
+            if node.kind == "module"
+            and node.qualified_name == normalized
+            and node.id != source.id
+        )
+    if ref.import_kind != "symbol" or source.language != "python":
+        return ()
+    owner_name, separator, symbol_name = normalized.rpartition(".")
+    if not separator or not owner_name or not symbol_name:
+        return ()
+    owner_paths = {
+        node.evidence.path
+        for node in local_nodes
+        if node.kind == "module" and node.qualified_name == owner_name
+    }
+    symbols = tuple(
+        node
+        for node in local_nodes
+        if node.evidence.path in owner_paths
+        and node.name == symbol_name
+        and node.kind in {"function", "class"}
+        and node.qualified_name in {f"{owner_name}.{symbol_name}", symbol_name}
+    )
+    if symbols:
+        return symbols
+    return tuple(
+        node
+        for node in local_nodes
+        if node.kind == "module" and node.qualified_name == normalized
+    )
+
+
 def normalized_import_name(source: Node, name: str) -> str:
     """Map explicit relative module spelling to extractor module names."""
     if source.language in {"javascript", "typescript"} and name.startswith(
@@ -157,7 +193,10 @@ def normalized_import_name(source: Node, name: str) -> str:
         )
         if path == ".." or path.startswith("../"):
             return name
-        return str(PurePosixPath(path).with_suffix("")).replace("/", ".")
+        suffix = PurePosixPath(path).suffix.casefold()
+        if suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}:
+            path = path[: -len(suffix)]
+        return path.replace("/", ".")
     if source.language == "python" and name.startswith("."):
         level = len(name) - len(name.lstrip("."))
         parts = list(PurePosixPath(source.evidence.path).parent.parts)

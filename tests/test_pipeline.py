@@ -63,6 +63,9 @@ def test_dynamic_import_stays_unresolved_with_diagnostic(tmp_path: Path) -> None
     [
         "def helper(): pass\ndef main(helper):\n    helper()\n",
         "def helper(): pass\ndef main():\n    def helper(): pass\n    helper()\n",
+        "def helper(): pass\ndef main():\n    (lambda helper: helper())(object())\n",
+        "def helper(): pass\ndef main(items):\n    [helper() for helper in items]\n",
+        "def helper(): pass\nhelper = lambda: None\ndef main():\n    helper()\n",
     ],
 )
 def test_python_local_binding_does_not_call_global_helper(
@@ -79,17 +82,25 @@ def test_python_import_form_distinguishes_module_from_class(tmp_path: Path) -> N
         "from lib import Helper\nimport Helper\n", encoding="utf-8"
     )
     graph = build_structural_graph(BuildOptions(tmp_path, ScanLimits()))
-    imports = {edge.evidence.start_line: edge for edge in graph.structural.edges if edge.relation == "imports"}
+    imports = {
+        edge.evidence.start_line: edge
+        for edge in graph.structural.edges
+        if edge.relation == "imports"
+    }
     targets = {node.id: node for node in graph.structural.nodes}
     assert targets[imports[1].target].kind == "class"
     assert targets[imports[1].target].evidence.path == "lib.py"
     assert targets[imports[2].target].kind == "external"
 
 
-def test_relative_dotted_typescript_import_keeps_dotted_basename(tmp_path: Path) -> None:
+def test_relative_dotted_typescript_import_keeps_dotted_basename(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "app.ts").write_text("import './util.test';\n", encoding="utf-8")
     (tmp_path / "util.ts").write_text("export function wrong() {}\n", encoding="utf-8")
-    (tmp_path / "util.test.ts").write_text("export function right() {}\n", encoding="utf-8")
+    (tmp_path / "util.test.ts").write_text(
+        "export function right() {}\n", encoding="utf-8"
+    )
     graph = build_structural_graph(BuildOptions(tmp_path, ScanLimits()))
     imports = [edge for edge in graph.structural.edges if edge.relation == "imports"]
     targets = {node.id: node for node in graph.structural.nodes}
@@ -98,10 +109,37 @@ def test_relative_dotted_typescript_import_keeps_dotted_basename(tmp_path: Path)
 
 
 def test_recursive_python_call_targets_itself(tmp_path: Path) -> None:
-    (tmp_path / "app.py").write_text(
-        "def helper():\n    helper()\n", encoding="utf-8"
-    )
+    (tmp_path / "app.py").write_text("def helper():\n    helper()\n", encoding="utf-8")
     graph = build_structural_graph(BuildOptions(tmp_path, ScanLimits()))
     calls = [edge for edge in graph.structural.edges if edge.relation == "calls"]
     assert len(calls) == 1
     assert calls[0].source == calls[0].target
+
+
+def test_edge_and_diagnostic_limits_fail_closed(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        "def helper():\n    __import__('one')\n    __import__('two')\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="max_edges"):
+        build_structural_graph(
+            BuildOptions(tmp_path, ScanLimits(), graph_limits=GraphLimits(max_edges=1))
+        )
+    with pytest.raises(ValueError, match="max_diagnostics"):
+        build_structural_graph(
+            BuildOptions(
+                tmp_path, ScanLimits(), graph_limits=GraphLimits(max_diagnostics=1)
+            )
+        )
+
+
+def test_candidate_limit_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("def helper(): pass\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("def helper(): pass\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("helper\nhelper\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="max_candidates"):
+        build_structural_graph(
+            BuildOptions(
+                tmp_path, ScanLimits(), graph_limits=GraphLimits(max_candidates=1)
+            )
+        )
