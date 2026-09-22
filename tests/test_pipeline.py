@@ -56,3 +56,52 @@ def test_dynamic_import_stays_unresolved_with_diagnostic(tmp_path: Path) -> None
         diagnostic.code == "dynamic_reference"
         for diagnostic in graph.structural.diagnostics
     )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def helper(): pass\ndef main(helper):\n    helper()\n",
+        "def helper(): pass\ndef main():\n    def helper(): pass\n    helper()\n",
+    ],
+)
+def test_python_local_binding_does_not_call_global_helper(
+    tmp_path: Path, source: str
+) -> None:
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    graph = build_structural_graph(BuildOptions(tmp_path, ScanLimits()))
+    assert not any(edge.relation == "calls" for edge in graph.structural.edges)
+
+
+def test_python_import_form_distinguishes_module_from_class(tmp_path: Path) -> None:
+    (tmp_path / "lib.py").write_text("class Helper: pass\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text(
+        "from lib import Helper\nimport Helper\n", encoding="utf-8"
+    )
+    graph = build_structural_graph(BuildOptions(tmp_path, ScanLimits()))
+    imports = {edge.evidence.start_line: edge for edge in graph.structural.edges if edge.relation == "imports"}
+    targets = {node.id: node for node in graph.structural.nodes}
+    assert targets[imports[1].target].kind == "class"
+    assert targets[imports[1].target].evidence.path == "lib.py"
+    assert targets[imports[2].target].kind == "external"
+
+
+def test_relative_dotted_typescript_import_keeps_dotted_basename(tmp_path: Path) -> None:
+    (tmp_path / "app.ts").write_text("import './util.test';\n", encoding="utf-8")
+    (tmp_path / "util.ts").write_text("export function wrong() {}\n", encoding="utf-8")
+    (tmp_path / "util.test.ts").write_text("export function right() {}\n", encoding="utf-8")
+    graph = build_structural_graph(BuildOptions(tmp_path, ScanLimits()))
+    imports = [edge for edge in graph.structural.edges if edge.relation == "imports"]
+    targets = {node.id: node for node in graph.structural.nodes}
+    assert len(imports) == 1
+    assert targets[imports[0].target].evidence.path == "util.test.ts"
+
+
+def test_recursive_python_call_targets_itself(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        "def helper():\n    helper()\n", encoding="utf-8"
+    )
+    graph = build_structural_graph(BuildOptions(tmp_path, ScanLimits()))
+    calls = [edge for edge in graph.structural.edges if edge.relation == "calls"]
+    assert len(calls) == 1
+    assert calls[0].source == calls[0].target
