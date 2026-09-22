@@ -116,6 +116,31 @@ def test_recursive_python_call_targets_itself(tmp_path: Path) -> None:
     assert calls[0].source == calls[0].target
 
 
+@pytest.mark.parametrize(
+    ("filename", "source"),
+    [
+        ("app.js", "function helper(helper) { helper(); }\n"),
+        ("app.ts", "function helper(helper: () => void) { helper(); }\n"),
+    ],
+)
+def test_javascript_self_name_with_parameter_is_not_proven_recursive(
+    tmp_path: Path, filename: str, source: str
+) -> None:
+    (tmp_path / filename).write_text(source, encoding="utf-8")
+    graph = build_structural_graph(BuildOptions(tmp_path, ScanLimits()))
+    assert not any(edge.relation == "calls" for edge in graph.structural.edges)
+
+
+def test_javascript_self_name_without_binding_proof_stays_unresolved(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.js").write_text(
+        "function helper() { helper(); }\n", encoding="utf-8"
+    )
+    graph = build_structural_graph(BuildOptions(tmp_path, ScanLimits()))
+    assert not any(edge.relation == "calls" for edge in graph.structural.edges)
+
+
 def test_edge_and_diagnostic_limits_fail_closed(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text(
         "def helper():\n    __import__('one')\n    __import__('two')\n",
