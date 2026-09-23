@@ -101,6 +101,14 @@ def test_answers_require_exact_id_bijection_type_and_model():
     assert validate_answers(questions, (good,), "jev-1.13.0") == (good,)
 
 
+@pytest.mark.parametrize("answer_count", [1, 2])
+def test_duplicate_requested_question_ids_are_rejected(answer_count):
+    question = NoulQuestion("q", "True?")
+    answer = ProviderAnswer.noul(0.5, "jev-1.13.0", "q")
+    with pytest.raises(ProviderSchemaError):
+        validate_answers((question, question), (answer,) * answer_count, "jev-1.13.0")
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

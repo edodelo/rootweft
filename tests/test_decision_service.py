@@ -10,7 +10,6 @@ from rootweft.decide.models import (
     DecisionPolicy,
     NoulQuestion,
     ProviderAnswer,
-    ProviderError,
     RemoteRequiredError,
     ScoreQuestion,
 )
@@ -151,15 +150,31 @@ def test_service_validates_custom_provider_answer_bijection():
 def test_single_option_candidates_get_atomic_question(relation, expected):
     class Atomic(Provider):
         def decide(self, state, questions):
-            assert isinstance(questions[0], expected)
-            raise ProviderError("stop")
+            self.calls.append((state, questions))
+            if relation == "calls":
+                return (ProviderAnswer.noul(0.8, self.model, "candidate"),)
+            return (ProviderAnswer.score(
+                "candidate", 1.5, {"0": 0, "1": 0.5, "2": 0.5}, 0.4, self.model
+            ),)
 
     original = graph()
     candidate = replace(
         original.adjudication.candidates[0], options=("a",), relation=relation
     )
     original = replace(original, adjudication=AdjudicationLayer((candidate,)))
-    adjudicate(original, Atomic(), DecisionPolicy())
+    provider = Atomic()
+    result = adjudicate(original, provider, DecisionPolicy())
+    assert len(provider.calls) == 1
+    _, questions = provider.calls[0]
+    assert len(questions) == 1
+    assert isinstance(questions[0], expected)
+    (decision,) = result.adjudication.decisions
+    assert decision.state == "review"
+    assert decision.candidate_id == "candidate"
+    assert decision.provenance["kind"] == ("noul" if relation == "calls" else "score")
+    assert decision.provenance["proposed_outcome"] == (0.8 if relation == "calls" else 1.5)
+    assert result.adjudication.diagnostics == ()
+    assert result.structural is original.structural
 
 
 def test_openrouter_provenance_records_request_and_returned_snapshot():

@@ -1,3 +1,4 @@
+import json
 import socket
 from dataclasses import replace
 
@@ -5,7 +6,7 @@ import httpx
 import pytest
 from test_decision_service import Provider, graph
 
-from rootweft.decide.models import DecisionPolicy, NoulQuestion, ProviderError
+from rootweft.decide.models import DecisionPolicy, NoulQuestion, ProviderError, RemoteRequiredError
 from rootweft.decide.providers import TypeSafeProvider
 from rootweft.decide.service import adjudicate, preview_egress
 from rootweft.models import AdjudicationLayer, Evidence, StructuralLayer
@@ -87,3 +88,47 @@ def test_provider_public_boundary_checks_state_and_questions(state, instructions
     )
     with pytest.raises(ProviderError):
         provider.decide(state, (NoulQuestion("q", instructions),))
+
+
+@pytest.mark.parametrize("path", [
+    "credentials/production.py", "secrets/customer.py",
+    ".env.production/config.py", ".npmrc/config.py",
+])
+@pytest.mark.parametrize("location", ["candidate", "source", "option"])
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("boundary", ["provider", "transport"])
+def test_credential_parent_blocks_every_evidence_location(path, location, required, boundary):
+    original = graph()
+    evidence = Evidence(path, 1, 2)
+    if location == "candidate":
+        candidate = replace(original.adjudication.candidates[0], evidence=evidence)
+        original = replace(original, adjudication=AdjudicationLayer((candidate,)))
+    else:
+        selected = "source" if location == "source" else "a"
+        nodes = tuple(replace(node, evidence=evidence) if node.id == selected else node for node in original.structural.nodes)
+        original = replace(original, structural=StructuralLayer(nodes))
+    before = json.dumps(original.structural.to_dict(), sort_keys=True).encode()
+    transport_calls = []
+
+    def handler(request):
+        transport_calls.append(request)
+        return httpx.Response(500)
+
+    provider = Provider() if boundary == "provider" else TypeSafeProvider(
+        api_key="test-key", policy=DecisionPolicy(max_retries=0), transport=httpx.MockTransport(handler)
+    )
+    if required:
+        with pytest.raises(RemoteRequiredError) as caught:
+            adjudicate(original, provider, DecisionPolicy(), require_remote=True)
+        result = caught.value.graph
+    else:
+        result = adjudicate(original, provider, DecisionPolicy())
+    assert result.structural is original.structural
+    assert json.dumps(result.structural.to_dict(), sort_keys=True).encode() == before
+    assert transport_calls == []
+    if boundary == "provider":
+        assert provider.calls == []
+    assert result.adjudication.diagnostics[-1].code == "remote_failure"
+    assert result.adjudication.decisions == ()
+    with pytest.raises(ProviderError):
+        preview_egress(original, DecisionPolicy())
