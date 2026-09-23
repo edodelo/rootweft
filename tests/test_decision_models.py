@@ -145,3 +145,10 @@ def test_score_must_match_probability_weighted_levels():
             ScoreQuestion("q", "Rate", ("low", "high")),
             ProviderAnswer.score("q", 0.9, {"0": 0.8, "1": 0.2}, 0.5, "jev-1.13.0"),
         )
+
+
+def test_score_accepts_documented_openrouter_rounding():
+    answer = ProviderAnswer.score(
+        "q", 1.99, {"0": 0, "1": 0, "2": 1}, 0.99, "typesafe/jev-1.13-20260917"
+    )
+    validate_answer(ScoreQuestion("q", "Urgency", ("low", "medium", "high")), answer)

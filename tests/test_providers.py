@@ -309,7 +309,11 @@ def test_response_stream_has_overall_deadline(monkeypatch):
 
     transport = httpx.MockTransport(lambda _: httpx.Response(200, stream=Slow()))
     with pytest.raises(ProviderError):
-        TypeSafeProvider(api_key="test-key", policy=DecisionPolicy(timeout_seconds=1, max_retries=0), transport=transport).decide("safe", QUESTIONS)
+        TypeSafeProvider(
+            api_key="test-key",
+            policy=DecisionPolicy(timeout_seconds=1, max_retries=0),
+            transport=transport,
+        ).decide("safe", QUESTIONS)
 
 
 def test_retry_after_exceeding_budget_never_retries():
@@ -320,15 +324,25 @@ def test_retry_after_exceeding_budget_never_retries():
         return httpx.Response(429, headers={"Retry-After": "3600"})
 
     with pytest.raises(ProviderError):
-        TypeSafeProvider(api_key="test-key", transport=httpx.MockTransport(handler), sleep=lambda _: pytest.fail("slept beyond budget")).decide("safe", QUESTIONS)
+        TypeSafeProvider(
+            api_key="test-key",
+            transport=httpx.MockTransport(handler),
+            sleep=lambda _: pytest.fail("slept beyond budget"),
+        ).decide("safe", QUESTIONS)
     assert len(calls) == 1
 
 
 def test_duplicate_json_answer_fields_rejected():
-    content = json.dumps(response()).replace('"noul": 0.8', '"noul": 0.8, "noul": 0.2').encode()
+    content = (
+        json.dumps(response())
+        .replace('"noul": 0.8', '"noul": 0.8, "noul": 0.2')
+        .encode()
+    )
     transport = httpx.MockTransport(lambda _: httpx.Response(200, content=content))
     with pytest.raises(ProviderSchemaError):
-        TypeSafeProvider(api_key="test-key", transport=transport).decide("safe", QUESTIONS)
+        TypeSafeProvider(api_key="test-key", transport=transport).decide(
+            "safe", QUESTIONS
+        )
 
 
 def test_deep_json_is_redacted_schema_failure():

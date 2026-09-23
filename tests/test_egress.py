@@ -53,7 +53,8 @@ def test_all_outbound_graph_labels_checked_for_secrets(field):
 
 @pytest.mark.parametrize(
     "path",
-    [".env", "config/credentials.json", "key.pem", "../private.py", "C:private.py"],
+    [".env", "config/credentials.json", "key.pem", "../private.py", "C:private.py",
+     "node_modules/package/index.js", "vendor/lib.py", ".git/hooks/run.py", ".ENV.production"],
 )
 def test_unsafe_evidence_paths_block_egress(path):
     original = graph()
