@@ -22,8 +22,7 @@ from rootweft.decide.models import (
 from rootweft.decide.providers import canonical, inspect_text, request_payload
 from rootweft.ids import evidence_fingerprint, stable_id
 from rootweft.models import AdjudicationLayer, Decision, Diagnostic, GraphDocument, Node
-from rootweft.scanner import _DEFAULT_IGNORED_NAMES
-from rootweft.secrets import _is_high_risk_filename
+from rootweft.scanner import _is_ignored
 
 POLICY_VERSION = "rootweft.decision.review.v1"
 
@@ -36,10 +35,8 @@ def _path(path: str) -> None:
         or PurePosixPath(path).is_absolute()
         or PureWindowsPath(path).drive
         or ".." in PurePosixPath(path).parts
-        or _is_high_risk_filename(path)
-        or PurePosixPath(path).name.casefold().startswith(".env.")
         or any(
-            part.casefold() in _DEFAULT_IGNORED_NAMES
+            _is_ignored(PurePosixPath(part), part, ())
             for part in PurePosixPath(path).parts
         )
     ):

@@ -228,12 +228,19 @@ def validate_answer(question: Question, answer: ProviderAnswer) -> None:
 def validate_answers(
     questions: tuple[Question, ...], answers: tuple[ProviderAnswer, ...], model: str
 ) -> tuple[ProviderAnswer, ...]:
+    question_ids = [question.id for question in questions]
+    if len(question_ids) != len(set(question_ids)):
+        raise ProviderSchemaError("duplicate question IDs")
     if not isinstance(answers, tuple) or not all(
         isinstance(a, ProviderAnswer) for a in answers
     ):
         raise ProviderSchemaError("invalid answer collection")
     ids = [a.question_id for a in answers]
-    if len(ids) != len(set(ids)) or set(ids) != {q.id for q in questions}:
+    if (
+        len(answers) != len(questions)
+        or len(ids) != len(set(ids))
+        or set(ids) != set(question_ids)
+    ):
         raise ProviderSchemaError("answer IDs must match questions exactly")
     by_id = {a.question_id: a for a in answers}
     for question in questions:

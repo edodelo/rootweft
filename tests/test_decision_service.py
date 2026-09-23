@@ -153,9 +153,11 @@ def test_single_option_candidates_get_atomic_question(relation, expected):
             self.calls.append((state, questions))
             if relation == "calls":
                 return (ProviderAnswer.noul(0.8, self.model, "candidate"),)
-            return (ProviderAnswer.score(
-                "candidate", 1.5, {"0": 0, "1": 0.5, "2": 0.5}, 0.4, self.model
-            ),)
+            return (
+                ProviderAnswer.score(
+                    "candidate", 1.5, {"0": 0, "1": 0.5, "2": 0.5}, 0.4, self.model
+                ),
+            )
 
     original = graph()
     candidate = replace(
@@ -172,7 +174,9 @@ def test_single_option_candidates_get_atomic_question(relation, expected):
     assert decision.state == "review"
     assert decision.candidate_id == "candidate"
     assert decision.provenance["kind"] == ("noul" if relation == "calls" else "score")
-    assert decision.provenance["proposed_outcome"] == (0.8 if relation == "calls" else 1.5)
+    assert decision.provenance["proposed_outcome"] == (
+        0.8 if relation == "calls" else 1.5
+    )
     assert result.adjudication.diagnostics == ()
     assert result.structural is original.structural
 
