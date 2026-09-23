@@ -117,6 +117,8 @@ def test_key_required_without_network(monkeypatch):
         (500, 3),
         (503, 3),
         (529, 3),
+        (501, 1),
+        (505, 1),
         (400, 1),
         (401, 1),
         (403, 1),
@@ -253,9 +255,13 @@ def test_spoofed_question_type_cannot_send_uninspected_payload():
             return {"type": "noul", "instructions": "leaked private data"}
 
     calls = []
-    transport = httpx.MockTransport(lambda request: calls.append(request) or httpx.Response(200, json=response()))
+    transport = httpx.MockTransport(
+        lambda request: calls.append(request) or httpx.Response(200, json=response())
+    )
     with pytest.raises(ProviderSchemaError):
-        TypeSafeProvider(api_key="test-key", transport=transport).decide("safe", (NoulQuestion(),))
+        TypeSafeProvider(api_key="test-key", transport=transport).decide(
+            "safe", (NoulQuestion(),)
+        )
     assert calls == []
 
 
@@ -265,9 +271,15 @@ def test_compressed_response_rejected_before_body_consumption():
             pytest.fail("compressed body was consumed")
             yield b""
 
-    transport = httpx.MockTransport(lambda _: httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=Unreadable()))
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(
+            200, headers={"Content-Encoding": "gzip"}, stream=Unreadable()
+        )
+    )
     with pytest.raises(ProviderSchemaError):
-        TypeSafeProvider(api_key="test-key", transport=transport).decide("safe", QUESTIONS)
+        TypeSafeProvider(api_key="test-key", transport=transport).decide(
+            "safe", QUESTIONS
+        )
 
 
 def test_response_stream_stops_at_byte_budget():
@@ -278,10 +290,52 @@ def test_response_stream_stops_at_byte_budget():
 
     transport = httpx.MockTransport(lambda _: httpx.Response(200, stream=Large()))
     with pytest.raises(ProviderSchemaError):
-        TypeSafeProvider(api_key="test-key", policy=DecisionPolicy(max_response_bytes=20), transport=transport).decide("safe", QUESTIONS)
+        TypeSafeProvider(
+            api_key="test-key",
+            policy=DecisionPolicy(max_response_bytes=20),
+            transport=transport,
+        ).decide("safe", QUESTIONS)
+
+
+def test_response_stream_has_overall_deadline(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("rootweft.decide.providers.time.monotonic", lambda: now[0])
+
+    class Slow(httpx.SyncByteStream):
+        def __iter__(self):
+            now[0] = 2.0
+            yield b" "
+            pytest.fail("continued reading beyond deadline")
+
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, stream=Slow()))
+    with pytest.raises(ProviderError):
+        TypeSafeProvider(api_key="test-key", policy=DecisionPolicy(timeout_seconds=1, max_retries=0), transport=transport).decide("safe", QUESTIONS)
+
+
+def test_retry_after_exceeding_budget_never_retries():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(429, headers={"Retry-After": "3600"})
+
+    with pytest.raises(ProviderError):
+        TypeSafeProvider(api_key="test-key", transport=httpx.MockTransport(handler), sleep=lambda _: pytest.fail("slept beyond budget")).decide("safe", QUESTIONS)
+    assert len(calls) == 1
+
+
+def test_duplicate_json_answer_fields_rejected():
+    content = json.dumps(response()).replace('"noul": 0.8', '"noul": 0.8, "noul": 0.2').encode()
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, content=content))
+    with pytest.raises(ProviderSchemaError):
+        TypeSafeProvider(api_key="test-key", transport=transport).decide("safe", QUESTIONS)
 
 
 def test_deep_json_is_redacted_schema_failure():
-    transport = httpx.MockTransport(lambda _: httpx.Response(200, content=b"[" * 2000 + b"]" * 2000))
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, content=b"[" * 2000 + b"]" * 2000)
+    )
     with pytest.raises(ProviderSchemaError):
-        TypeSafeProvider(api_key="test-key", transport=transport).decide("safe", QUESTIONS)
+        TypeSafeProvider(api_key="test-key", transport=transport).decide(
+            "safe", QUESTIONS
+        )

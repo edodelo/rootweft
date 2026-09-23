@@ -125,7 +125,23 @@ def test_preview_copies_mutable_paths():
     assert preview.paths == ("src/app.py",)
 
 
-@pytest.mark.parametrize("model", ["typesafe/jev-1.13-20269999", "typesafe/jev-1.14-20260917", "typesafe/jev-latest"])
+@pytest.mark.parametrize(
+    "model",
+    ["typesafe/jev-1.13-20269999", "typesafe/jev-1.14-20260917", "typesafe/jev-latest"],
+)
 def test_openrouter_rejects_invalid_snapshot_identifiers(model):
     with pytest.raises(ProviderSchemaError):
         ProviderAnswer.noul(0.5, model)
+
+
+def test_choice_must_select_a_highest_probability_option():
+    with pytest.raises(ProviderSchemaError):
+        ProviderAnswer.choice("q", "b", {"a": 0.9, "b": 0.1}, 0.7, "jev-1.13.0")
+
+
+def test_score_must_match_probability_weighted_levels():
+    with pytest.raises(ProviderSchemaError):
+        validate_answer(
+            ScoreQuestion("q", "Rate", ("low", "high")),
+            ProviderAnswer.score("q", 0.9, {"0": 0.8, "1": 0.2}, 0.5, "jev-1.13.0"),
+        )

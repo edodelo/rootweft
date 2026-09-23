@@ -168,10 +168,15 @@ def test_openrouter_provenance_records_request_and_returned_snapshot():
         model = "typesafe/jev-1.13"
 
         def decide(self, state, questions):
-            return (ProviderAnswer.choice(
-                "candidate", "a", {"a": 1, "b": 0, "none": 0}, 1,
-                "typesafe/jev-1.13-20260917",
-            ),)
+            return (
+                ProviderAnswer.choice(
+                    "candidate",
+                    "a",
+                    {"a": 1, "b": 0, "none": 0},
+                    1,
+                    "typesafe/jev-1.13-20260917",
+                ),
+            )
 
     result = adjudicate(graph(), Routed(), DecisionPolicy())
     provenance = result.adjudication.decisions[0].provenance
@@ -179,16 +184,25 @@ def test_openrouter_provenance_records_request_and_returned_snapshot():
     assert provenance["model"] == "typesafe/jev-1.13-20260917"
     assert provenance["options"] == ("a", "b", "none")
     assert re.fullmatch("[0-9a-f]{64}", provenance["question_hash"])
-    assert datetime.fromisoformat(provenance["timestamp"]).utcoffset().total_seconds() == 0
+    assert (
+        datetime.fromisoformat(provenance["timestamp"]).utcoffset().total_seconds() == 0
+    )
     assert provenance["reproducible"] is False
 
 
 def test_question_hash_covers_state_changes_without_storing_metadata():
     original = graph()
     first = adjudicate(original, Provider(), DecisionPolicy())
-    node = replace(original.structural.nodes[0], name="renamed", metadata={"source": "raw code"})
-    changed = replace(original, structural=StructuralLayer((node,) + original.structural.nodes[1:]))
+    node = replace(
+        original.structural.nodes[0], name="renamed", metadata={"source": "raw code"}
+    )
+    changed = replace(
+        original, structural=StructuralLayer((node,) + original.structural.nodes[1:])
+    )
     provider = Provider()
     second = adjudicate(changed, provider, DecisionPolicy())
-    assert first.adjudication.decisions[0].provenance["question_hash"] != second.adjudication.decisions[0].provenance["question_hash"]
+    assert (
+        first.adjudication.decisions[0].provenance["question_hash"]
+        != second.adjudication.decisions[0].provenance["question_hash"]
+    )
     assert "raw code" not in provider.calls[0][0]
