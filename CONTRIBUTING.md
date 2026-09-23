@@ -29,6 +29,10 @@ python -m venv .venv
 pip install -e ".[mcp]" -r requirements-dev.txt
 ```
 
+`uv.lock` records a fully resolved dependency set for reproducible
+environments (`uv sync --extra mcp`); regenerate it with `uv lock` when
+dependencies change.
+
 ## Checks (the same gates CI runs)
 
 ```bash
