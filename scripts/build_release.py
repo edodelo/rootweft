@@ -15,11 +15,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
+import io
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import venv
 from pathlib import Path
@@ -62,6 +65,35 @@ def write_checksums(dist: Path) -> Path:
     return target
 
 
+def normalise_sdist(path: Path, epoch: int) -> None:
+    """Rewrite the sdist with sorted members and fixed metadata/timestamps."""
+    with tarfile.open(path, "r:gz") as source:
+        members = sorted(source.getmembers(), key=lambda member: member.name)
+        payload = {
+            member.name: source.extractfile(member).read()  # type: ignore[union-attr]
+            for member in members
+            if member.isfile()
+        }
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as target:
+        for member in members:
+            member.mtime = epoch
+            member.uid = member.gid = 0
+            member.uname = member.gname = ""
+            executable = member.isdir() or bool(member.mode & 0o111)
+            member.mode = 0o755 if executable else 0o644
+            member.pax_headers = {}
+            content = payload.get(member.name)
+            target.addfile(member, io.BytesIO(content) if content is not None else None)
+    with (
+        path.open("wb") as raw,
+        gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw, mtime=epoch, compresslevel=9
+        ) as compressed,
+    ):
+        compressed.write(buffer.getvalue())
+
+
 def venv_python(directory: Path) -> Path:
     scripts = "Scripts" if os.name == "nt" else "bin"
     suffix = ".exe" if os.name == "nt" else ""
@@ -92,6 +124,7 @@ def build(
     sdists = sorted(dist.glob("*.tar.gz"))
     if len(wheels) != 1 or len(sdists) != 1:
         raise SystemExit("expected exactly one wheel and one sdist")
+    normalise_sdist(sdists[0], int(env["SOURCE_DATE_EPOCH"]))
 
     with tempfile.TemporaryDirectory(prefix="rootweft-sbom-") as scratch:
         python = sbom_python

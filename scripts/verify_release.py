@@ -292,6 +292,9 @@ def verify(
     check_docs()
     if smoke:
         smoke_install(wheel, offline=offline_smoke)
+        if not offline_smoke:
+            # Building from the sdist needs the build backend from the index.
+            smoke_install(dist / f"rootweft-{version}.tar.gz")
 
 
 def main(argv: list[str] | None = None) -> int:
