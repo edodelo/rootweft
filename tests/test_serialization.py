@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -106,3 +107,42 @@ def test_failed_replace_removes_the_temporary_artifact(
         dump_graph(minimal_graph(nodes_in_reverse_order=False), path)
 
     assert list(tmp_path.glob(".graph.json.*.tmp")) == []
+
+
+def test_import_rejects_oversized_file_before_json_decoder(tmp_path, monkeypatch):
+    path = tmp_path / "oversized.json"
+    with path.open("wb") as stream:
+        stream.truncate(64 * 1024 * 1024 + 1)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("oversized input reached JSON decoder")
+
+    monkeypatch.setattr("rootweft.serialization.json.loads", forbidden)
+    with pytest.raises(CorruptGraphError):
+        load_graph(path)
+
+
+@pytest.mark.parametrize("kind", ["options", "records", "depth"])
+def test_import_preflight_rejects_excessive_structure(tmp_path, kind):
+    raw = minimal_graph(nodes_in_reverse_order=False).to_dict()
+    if kind == "options":
+        raw["adjudication"]["candidates"] = [
+            {
+                "id": "candidate",
+                "source": "node-alpha",
+                "relation": "calls",
+                "evidence": {"path": "app.py", "start_line": 1, "end_line": 1},
+                "options": ["node-beta"] * 10000,
+            }
+        ]
+    elif kind == "records":
+        raw["structural"]["diagnostics"] = [{"code": "x", "message": "x"}] * 1001
+    else:
+        nested = {}
+        for _ in range(50):
+            nested = {"nested": nested}
+        raw["structural"]["nodes"][0]["metadata"] = nested
+    path = tmp_path / "graph.json"
+    path.write_text(json.dumps(raw))
+    with pytest.raises(CorruptGraphError):
+        load_graph(path)

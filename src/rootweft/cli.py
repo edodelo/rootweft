@@ -11,10 +11,11 @@ import argparse
 import importlib
 import json
 import os
+import stat
 import sys
 import tomllib
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from rootweft.decide import (
@@ -169,10 +170,19 @@ def _settings(args: argparse.Namespace) -> dict[str, Any]:
     result = {}
     for key, default in defaults.items():
         value = getattr(args, key, None)
+        config_key = (
+            "html_output" if key == "output" and args.command == "export-html" else key
+        )
+        environment_key = "ROOTWEFT_" + config_key.upper()
+        project_sourced = (
+            value is None
+            and environment_key not in os.environ
+            and config_key in project
+        )
         if key == "graph":
             value = getattr(args, "graph_option", None) or value
         if value is None:
-            value = os.environ.get("ROOTWEFT_" + key.upper(), project.get(key, default))
+            value = os.environ.get(environment_key, project.get(config_key, default))
         try:
             if isinstance(default, bool):
                 if isinstance(value, str) and value.lower() in {
@@ -200,7 +210,52 @@ def _settings(args: argparse.Namespace) -> dict[str, Any]:
         except (ValueError, TypeError, OverflowError):
             raise ConfigurationError(f"invalid {key} setting") from None
         result[key] = value
+        if key == "output" and project_sourced and args.command == "build":
+            result[key] = str(_project_output(root, str(value)))
+            result["project_output"] = value
     return result
+
+
+def _project_output(root: Path, configured: str) -> Path:
+    """Repository configuration may write only beneath its real .rootweft dir."""
+    relative = Path(configured)
+    if (
+        relative.is_absolute()
+        or PureWindowsPath(configured).drive
+        or ".." in relative.parts
+        or ".." in PureWindowsPath(configured).parts
+        or ":" in configured
+    ):
+        raise ConfigurationError("project output must stay within .rootweft")
+    parts = relative.parts
+    if parts and parts[0] == ".rootweft":
+        parts = parts[1:]
+    if not parts:
+        raise ConfigurationError("project output must name a file")
+    canonical_root = root.resolve(strict=True)
+    designated = canonical_root / ".rootweft"
+    target = designated.joinpath(*parts)
+    current = canonical_root
+    for part in (".rootweft", *parts):
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ConfigurationError(
+                "project output cannot use links or reparse points"
+            )
+    if not target.parent.resolve().is_relative_to(designated):
+        raise ConfigurationError("project output must stay within .rootweft")
+    return target
+
+
+def _check_export_destination(source: Path, output: Path) -> None:
+    if source.resolve() == output.resolve() or (
+        source.exists() and output.exists() and source.samefile(output)
+    ):
+        raise ConfigurationError("HTML output must differ from the source graph")
 
 
 def _policy(settings: dict[str, Any]) -> DecisionPolicy:
@@ -281,7 +336,10 @@ def _build(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     except RemoteRequiredError as error:
         document = error.graph
         code = 5
-    dump_graph(document, Path(settings["output"]))
+    output = Path(settings["output"])
+    if "project_output" in settings:
+        output = _project_output(Path(args.root), settings["project_output"])
+    dump_graph(document, output)
     if args.json:
         # Preserve the canonical artifact bytes, including Unicode names.
         payload = canonical_json(document).decode("utf-8")
@@ -338,6 +396,8 @@ def _dispatch(args: argparse.Namespace, settings: dict[str, Any]) -> int:
                 "MCP support is not installed in this version"
             ) from None
         return int(module.main([settings["graph"]]))
+    if command == "export-html":
+        _check_export_destination(Path(settings["graph"]), Path(settings["output"]))
     document = load_graph(Path(settings["graph"]))
     try:
         index = GraphIndex.from_document(document)
@@ -371,6 +431,7 @@ def _dispatch(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     elif command == "explain":
         result = index.explain_edge(args.edge_id)
     elif command == "export-html":
+        _check_export_destination(Path(settings["graph"]), Path(settings["output"]))
         render_viewer(document, Path(settings["output"]), settings["max_visible"])
         result = {"output": settings["output"]}
     else:

@@ -1,6 +1,7 @@
 """Public command behavior, including errors that must not destroy artifacts."""
 
 import json
+import os
 import socket
 from pathlib import Path
 
@@ -77,7 +78,7 @@ def test_usage_returns_two_without_system_exit(args, capsys):
 def test_configuration_precedence(repo, monkeypatch, capsys):
     (repo / ".rootweft.toml").write_text('[rootweft]\noutput="project.json"\n')
     assert run("build", repo, "--json") == 0
-    assert Path("project.json").exists()
+    assert (repo / ".rootweft/project.json").exists()
     monkeypatch.setenv("ROOTWEFT_OUTPUT", "environment.json")
     assert run("build", repo, "--json") == 0
     assert Path("environment.json").exists()
@@ -265,3 +266,68 @@ def test_export_html_writes_standalone_artifact(repo, capsys):
     )
     assert Path("map.html").is_file()
     assert json.loads(capsys.readouterr().out)["output"] == "map.html"
+
+
+@pytest.mark.parametrize("configured", ["../victim.json", "absolute"])
+def test_repository_output_cannot_escape_designated_directory(repo, configured):
+    victim = repo.parent / "victim.json"
+    victim.write_bytes(b"keep me")
+    value = str(victim).replace("\\", "/") if configured == "absolute" else configured
+    (repo / ".rootweft.toml").write_text(f'output="{value}"\n')
+    assert run("build", repo, "--json") == 2
+    assert victim.read_bytes() == b"keep me"
+
+
+def test_repository_output_rejects_symlink_parent(repo):
+    outside = repo.parent / "outside"
+    outside.mkdir()
+    (outside / "graph.json").write_bytes(b"keep me")
+    try:
+        (repo / ".rootweft").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks unavailable")
+    (repo / ".rootweft.toml").write_text('output=".rootweft/graph.json"\n')
+    assert run("build", repo, "--json") == 2
+    assert (outside / "graph.json").read_bytes() == b"keep me"
+
+
+def test_repository_output_is_contained_and_explicit_override_is_allowed(repo):
+    (repo / ".rootweft.toml").write_text('output=".rootweft/maps/graph.json"\n')
+    assert run("build", repo, "--json") == 0
+    assert load_graph(repo / ".rootweft/maps/graph.json").structural.nodes
+    explicit = repo.parent / "explicit.json"
+    assert run("build", repo, "--output", explicit, "--json") == 0
+    assert load_graph(explicit).structural.nodes
+
+
+@pytest.mark.parametrize("source", ["project", "environment"])
+def test_export_ignores_build_output_defaults(repo, monkeypatch, source):
+    assert run("build", repo, "--json") == 0
+    original = Path("graph.json").read_bytes()
+    if source == "project":
+        Path(".rootweft.toml").write_text('output="graph.json"\n')
+    else:
+        monkeypatch.setenv("ROOTWEFT_OUTPUT", "graph.json")
+    assert run("export-html", "graph.json", "--json") == 0
+    assert Path("graph.json").read_bytes() == original
+    assert Path("graph.html").read_text().startswith("<!doctype html>")
+
+
+@pytest.mark.parametrize("source", ["project", "environment", "flag", "hardlink"])
+def test_export_rejects_graph_output_alias(repo, monkeypatch, source):
+    assert run("build", repo, "--json") == 0
+    original = Path("graph.json").read_bytes()
+    extra = []
+    if source == "project":
+        Path(".rootweft.toml").write_text('html_output="graph.json"\n')
+    elif source == "environment":
+        monkeypatch.setenv("ROOTWEFT_HTML_OUTPUT", "graph.json")
+    elif source == "hardlink":
+        os.link("graph.json", "alias.html")
+        extra = ["--output", "alias.html"]
+    else:
+        extra = ["--output", str(Path.cwd() / "graph.json")]
+    assert run("export-html", "graph.json", *extra, "--json") == 2
+    assert Path("graph.json").read_bytes() == original
+    if source == "hardlink":
+        assert Path("alias.html").read_bytes() == original

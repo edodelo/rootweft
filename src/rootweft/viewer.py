@@ -12,7 +12,11 @@ from pathlib import Path
 
 from rootweft.models import GraphDocument
 from rootweft.query import GraphIndex
-from rootweft.serialization import canonical_json
+from rootweft.serialization import (
+    MAX_ARTIFACT_BYTES,
+    canonical_json,
+    validate_graph_limits,
+)
 
 
 def render_viewer(
@@ -21,8 +25,12 @@ def render_viewer(
     """Export a standalone viewer. Graph strings never enter executable markup."""
     if type(max_visible) is not int or not 1 <= max_visible <= 10_000:
         raise ValueError("max_visible must be between 1 and 10000")
+    validate_graph_limits(document)
     GraphIndex.from_document(document)
-    payload = base64.b64encode(canonical_json(document)).decode("ascii")
+    encoded = canonical_json(document)
+    if len(encoded) > MAX_ARTIFACT_BYTES:
+        raise ValueError("viewer artifact byte budget exceeded")
+    payload = base64.b64encode(encoded).decode("ascii")
     template = (
         files("rootweft").joinpath("assets/viewer.html").read_text(encoding="utf-8")
     )

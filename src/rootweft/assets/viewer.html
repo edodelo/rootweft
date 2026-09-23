@@ -75,20 +75,29 @@
     detail.append(name, element("p", node.qualified_name || node.name, "name"), element("p", `${node.kind} / ${node.language}`, "muted"), element("p", coordinate(node.evidence), "coordinate"));
     const related = (incident.get(id) || []).filter(matchesRelation);
     detail.append(element("h3", "Relationships"));
-    detail.append(element("p", `Showing ${Math.min(related.length, cap)} of ${related.length} relationships.`, "muted"));
+    const summary = element("p", "", "muted");
+    detail.append(summary);
     if (!related.length) detail.append(element("p", "No relationships match. Try all relations and layers.", "empty"));
     const list = element("ul", undefined, "relations");
-    for (const record of related.slice(0, cap)) {
+    let remaining = cap, shown = 0, limited = false;
+    for (const record of related) {
+      if (remaining === 0) { limited = true; break; }
+      remaining--; shown++;
       const row = element("li", undefined, record.layer === "review" ? "review" : "");
       row.append(element("p", `${record.relation} / ${record.layer} / ${record.status}`), element("p", coordinate(record.evidence), "coordinate"));
       const targets = record.target ? [record.source === id ? record.target : record.source] : [...new Set([record.source, ...record.options])].filter(target => target !== id);
-      for (const target of targets.slice(0, cap)) {
+      const visibleTargets = targets.slice(0, remaining);
+      for (const target of visibleTargets) {
+        remaining--;
         const button = element("button", nodeMap.get(target)?.name || target, "relation-link");
         button.type = "button";
         button.addEventListener("click", () => { select(target); byId("detail-name")?.focus(); });
         row.append(button, element("br"));
       }
-      if (targets.length > cap) row.append(element("p", `Only ${cap} of ${targets.length} targets shown.`, "muted"));
+      if (targets.length > visibleTargets.length) {
+        limited = true;
+        row.append(element("p", `Only ${visibleTargets.length} of ${targets.length} targets shown.`, "muted"));
+      }
       const decision = decisionMap.get(record.id);
       if (record.layer === "review") {
         row.append(element("p", "Candidate for human review; it is not an accepted structural edge.", "muted"));
@@ -96,6 +105,7 @@
       }
       list.append(row);
     }
+    summary.textContent = `Showing ${shown} of ${related.length} relationships.${limited ? ` Expansion limited to a shared budget of ${cap} relationships and targets. Narrow the filters to inspect more.` : ""}`;
     detail.append(list);
   }
   function render() {

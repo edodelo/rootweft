@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import replace
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -187,5 +188,88 @@ const assert = require("node:assert/strict");
         capture_output=True,
         timeout=60,
         check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def dense_graph(candidate_count=600, option_count=16):
+    evidence = Evidence("src/app.py", 1, 1)
+    nodes = tuple(
+        Node(str(i), "function", f"symbol{i}", None, "python", evidence)
+        for i in range(option_count + 1)
+    )
+    candidates = tuple(
+        Candidate(
+            f"candidate{i}",
+            "0",
+            "calls",
+            evidence,
+            tuple(str(j) for j in range(1, option_count + 1)),
+        )
+        for i in range(candidate_count)
+    )
+    return GraphDocument(
+        SCHEMA_VERSION,
+        "v1",
+        "v1",
+        StructuralLayer(nodes),
+        AdjudicationLayer(candidates),
+    )
+
+
+@pytest.mark.parametrize("kind", ["options", "label", "records"])
+def test_direct_viewer_rejects_excessive_document_before_output(tmp_path, kind):
+    graph = dense_graph(1, 1)
+    if kind == "options":
+        graph = dense_graph(1, 10000)
+    elif kind == "label":
+        graph = replace(
+            graph,
+            structural=StructuralLayer(
+                (replace(graph.structural.nodes[0], name="x" * 1_000_000),)
+            ),
+        )
+    else:
+        graph = dense_graph(20001, 1)
+    output = tmp_path / "viewer.html"
+    output.write_bytes(b"keep viewer")
+    with pytest.raises(ValueError):
+        render(graph, output)
+    assert output.read_bytes() == b"keep viewer"
+    assert list(tmp_path.iterdir()) == [output]
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ROOTWEFT_BROWSER_EXECUTABLE") or not shutil.which("node"),
+    reason="set ROOTWEFT_BROWSER_EXECUTABLE and NODE_PATH to run browser checks",
+)
+def test_browser_candidate_expansion_has_aggregate_budget(tmp_path):
+    output = tmp_path / "viewer.html"
+    render(dense_graph(), output, max_visible=500)
+    script = r"""
+const {chromium} = require("playwright");
+const assert = require("node:assert/strict");
+(async () => {
+  const browser = await chromium.launch({
+    executablePath:process.env.ROOTWEFT_BROWSER_EXECUTABLE, headless:true
+  });
+  try {
+    const page = await browser.newPage();
+    await page.goto(process.argv[2]);
+    await page.locator("#results button").first().click();
+    const rows = await page.locator(".relations li").count();
+    const targets = await page.locator(".relation-link").count();
+    assert.ok(rows + targets <= 500, `${rows} rows plus ${targets} targets`);
+    assert.match(await page.locator("#detail").textContent(), /limited|budget/i);
+    assert.ok(await page.locator("#detail *").count() < 2500);
+  } finally { await browser.close(); }
+})().catch(error => {console.error(error);process.exit(1);});
+"""
+    result = subprocess.run(
+        ["node", "-", output.as_uri()],
+        input=script,
+        text=True,
+        capture_output=True,
+        timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
