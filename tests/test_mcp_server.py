@@ -207,11 +207,19 @@ def test_newer_schema_fails_before_transport(tmp_path: Path, capsys) -> None:
 
 
 def test_server_module_opens_no_network(graph_path: Path, monkeypatch) -> None:
+    original_connect = socket.socket.connect
+
     def deny(*args: object, **kwargs: object) -> None:
         raise AssertionError("network access attempted")
 
+    def loopback_only(self: socket.socket, address: Any) -> None:
+        # Windows event loops build their self-pipe from a loopback socketpair.
+        if isinstance(address, tuple) and address[0] in {"127.0.0.1", "::1"}:
+            return original_connect(self, address)
+        raise AssertionError("network access attempted")
+
     monkeypatch.setattr(socket, "create_connection", deny)
-    monkeypatch.setattr(socket.socket, "connect", deny)
+    monkeypatch.setattr(socket.socket, "connect", loopback_only)
     server = create_mcp_server(graph_path)
     assert structured(call(server, "graph_info", {}))["node_count"] > 0
 
