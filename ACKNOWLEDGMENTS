@@ -1,0 +1,20 @@
+Rootweft acknowledgments
+========================
+
+Rootweft stands on the work of these projects, used under their own licenses
+(see THIRD_PARTY_NOTICES.md):
+
+- The Python `ast` module and the CPython developers.
+- tree-sitter and the tree-sitter JavaScript and TypeScript grammar
+  maintainers.
+- The Model Context Protocol specification and official Python SDK
+  maintainers.
+- HTTPX and its dependencies.
+- pytest, Ruff, mypy, setuptools, build and pip-audit, used for development
+  and release verification.
+
+Thanks to TypeSafe AI and OpenRouter for publishing the API documentation the
+optional Jev adapters are written against, and to the authors of the public
+Agent Skills convention.
+
+Naming these projects does not imply that any of them endorses Rootweft.
