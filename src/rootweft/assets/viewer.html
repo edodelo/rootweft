@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-__SCRIPT_HASH__'; style-src 'sha256-__STYLE_HASH__'; connect-src 'none'; img-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Rootweft — repository relationships</title>
+<style>
+:root{color-scheme:light;--ink:#172B37;--fog:#F1F4F3;--mineral:#D9E1DE;--current:#246B67;--amber:#A46B25;--rust:#9C4A42;font-family:"Segoe UI",Arial,sans-serif;color:var(--ink);background:var(--fog)}
+*{box-sizing:border-box}body{margin:0}header{padding:1.4rem 2rem;border-bottom:1px solid var(--mineral);display:flex;align-items:baseline;gap:1.5rem;flex-wrap:wrap}h1{font:2.3rem Georgia,serif;margin:0}h2{font-size:1.05rem;font-weight:600;margin:0 0 1rem}h3{font-size:.95rem;margin:1.6rem 0 .7rem}p{line-height:1.6;max-width:76ch}header p{margin:0}.layout{display:grid;grid-template-columns:240px minmax(260px,1fr) minmax(280px,360px);min-height:calc(100vh - 100px)}aside,main,section.detail{padding:1.7rem;min-width:0}aside,main{border-right:1px solid var(--mineral)}label{display:block;margin:0 0 .45rem;font-size:.88rem}input,select,button{font:inherit;color:inherit}input,select{width:100%;background:#fff;border:1px solid #879A95;border-radius:4px;padding:.65rem .55rem;margin-bottom:1.2rem}input:focus-visible,select:focus-visible,button:focus-visible{outline:3px solid var(--current);outline-offset:3px}button{cursor:pointer}.muted{color:#48616B;font-size:.86rem}.warning{border-left:3px solid var(--amber);padding-left:.8rem;font-size:.85rem}.spine{list-style:none;margin:1.2rem 0 0 .4rem;padding:0 0 0 1.1rem;border-left:1px solid #97AAA5}.spine li{position:relative;margin:0 0 .6rem}.spine li:before{content:"";position:absolute;left:-1.1rem;top:1.2rem;width:1rem;border-top:1px solid #97AAA5}.node-button{display:block;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-radius:3px;padding:.6rem;overflow-wrap:anywhere}.node-button:hover{background:#E4EBE8}.node-button[aria-pressed=true]{border-color:var(--current);background:#E0ECE7}.name{display:block;font-family:Consolas,monospace;font-size:.93rem;unicode-bidi:plaintext}.coordinate{display:block;font-family:Consolas,monospace;font-size:.77rem;color:#48616B;margin-top:.4rem;overflow-wrap:anywhere;unicode-bidi:plaintext}.detail{background:#FAFBFA;overflow-wrap:anywhere}.detail h2{color:var(--current)}.relations{list-style:none;padding:0}.relations li{padding:.8rem 0;border-bottom:1px solid var(--mineral)}.review{border-left:3px solid var(--amber);padding-left:.7rem!important}.relation-link{background:transparent;border:0;text-decoration:underline;text-align:left;padding:.2rem 0;color:var(--current);overflow-wrap:anywhere;max-width:100%}.reset{background:transparent;border:1px solid #879A95;border-radius:3px;padding:.5rem .7rem}.empty{padding:1rem 0}#detail-name{font-family:Consolas,monospace;font-size:1.12rem}#counts{margin-top:1.5rem}
+@media(max-width:980px){.layout{grid-template-columns:210px minmax(0,1fr)}section.detail{grid-column:1/-1;border-top:1px solid var(--mineral)}main{border-right:0}}@media(max-width:600px){header{padding:1.2rem}.layout{display:block}aside,main,section.detail{padding:1.2rem;border-right:0;border-bottom:1px solid var(--mineral)}h1{font-size:2rem}}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body data-max-visible="__MAX_VISIBLE__">
+<header><h1>Rootweft</h1><p>Repository relationships, with evidence</p></header>
+<div class="layout">
+<aside aria-label="Find and filter symbols">
+<label for="search">Find a symbol</label><input id="search" type="search" placeholder="Name or qualified name" autocomplete="off">
+<label for="relation">Relation</label><select id="relation"><option value="">All relations</option></select>
+<label for="layer">Layer</label><select id="layer"><option value="all">All layers</option><option value="structural">Structural</option><option value="review">Candidates and review</option></select>
+<button class="reset" id="reset" type="button">Clear filters</button>
+<p id="counts" class="muted"></p>
+<p class="warning">This artifact may contain proprietary fragments, symbol names, and source paths. Review it before sharing. It works entirely offline.</p>
+</aside>
+<main><h2>Symbols and relationships</h2><p class="muted" id="results-status" role="status" aria-live="polite"></p><ul id="results" class="spine"></ul></main>
+<section class="detail" aria-label="Selected symbol evidence"><h2>Evidence</h2><div id="detail"><p>Select a symbol to inspect its relationships and source coordinates.</p></div></section>
+</div>
+<noscript><p>Enable JavaScript in your browser to inspect this local graph. No network access is needed.</p></noscript>
+<script id="graph-data" type="application/octet-stream">__GRAPH_BASE64__</script>
+<script>
+"use strict";
+(() => {
+  const byId = id => document.getElementById(id);
+  const graph = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(byId("graph-data").textContent.trim()), c => c.charCodeAt(0))));
+  const cap = Number(document.body.dataset.maxVisible);
+  const nodes = graph.structural.nodes;
+  const nodeMap = new Map(nodes.map(node => [node.id, node]));
+  const decisionMap = new Map(graph.adjudication.decisions.map(item => [item.candidate_id, item]));
+  const edges = graph.structural.edges.map(edge => ({...edge, layer:"structural"}));
+  const candidates = graph.adjudication.candidates.map(item => ({...item, layer:"review", status:decisionMap.get(item.id)?.state || "candidate"}));
+  const records = edges.concat(candidates);
+  const incident = new Map();
+  for (const record of records) {
+    for (const id of new Set([record.source, ...(record.target ? [record.target] : record.options)])) {
+      if (!incident.has(id)) incident.set(id, []);
+      incident.get(id).push(record);
+    }
+  }
+  const clean = value => {
+    const raw = String(value ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+    return raw.length > 240 ? raw.slice(0, 240) + "… [label shortened]" : raw;
+  };
+  const element = (tag, text, className) => {
+    const node = document.createElement(tag);
+    if (text !== undefined) node.textContent = clean(text);
+    if (className) node.className = className;
+    return node;
+  };
+  const coordinate = evidence => `${evidence.path}:${evidence.start_line}–${evidence.end_line}`;
+  for (const relation of [...new Set(records.map(item => item.relation))].sort()) {
+    const option = element("option", relation);
+    option.value = relation;
+    byId("relation").append(option);
+  }
+  let selected = null;
+  const matchesRelation = record => (!byId("relation").value || record.relation === byId("relation").value) && (byId("layer").value === "all" || record.layer === byId("layer").value);
+  function select(id) {
+    selected = id;
+    for (const button of byId("results").querySelectorAll("button")) button.setAttribute("aria-pressed", String(button.dataset.nodeId === id));
+    const node = nodeMap.get(id);
+    const detail = byId("detail");
+    detail.replaceChildren();
+    if (!node) { detail.append(element("p", "This symbol is absent from the graph.")); return; }
+    const name = element("h3", node.name); name.id = "detail-name"; name.tabIndex = -1;
+    detail.append(name, element("p", node.qualified_name || node.name, "name"), element("p", `${node.kind} / ${node.language}`, "muted"), element("p", coordinate(node.evidence), "coordinate"));
+    const related = (incident.get(id) || []).filter(matchesRelation);
+    detail.append(element("h3", "Relationships"));
+    detail.append(element("p", `Showing ${Math.min(related.length, cap)} of ${related.length} relationships.`, "muted"));
+    if (!related.length) detail.append(element("p", "No relationships match. Try all relations and layers.", "empty"));
+    const list = element("ul", undefined, "relations");
+    for (const record of related.slice(0, cap)) {
+      const row = element("li", undefined, record.layer === "review" ? "review" : "");
+      row.append(element("p", `${record.relation} / ${record.layer} / ${record.status}`), element("p", coordinate(record.evidence), "coordinate"));
+      const targets = record.target ? [record.source === id ? record.target : record.source] : [...new Set([record.source, ...record.options])].filter(target => target !== id);
+      for (const target of targets.slice(0, cap)) {
+        const button = element("button", nodeMap.get(target)?.name || target, "relation-link");
+        button.type = "button";
+        button.addEventListener("click", () => { select(target); byId("detail-name")?.focus(); });
+        row.append(button, element("br"));
+      }
+      if (targets.length > cap) row.append(element("p", `Only ${cap} of ${targets.length} targets shown.`, "muted"));
+      const decision = decisionMap.get(record.id);
+      if (record.layer === "review") {
+        row.append(element("p", "Candidate for human review; it is not an accepted structural edge.", "muted"));
+        if (decision) row.append(element("p", `Proposed outcome: ${decision.provenance.proposed_outcome}; provider: ${decision.provenance.provider}; model: ${decision.provenance.model}`, "muted"));
+      }
+      list.append(row);
+    }
+    detail.append(list);
+  }
+  function render() {
+    const needle = byId("search").value.toLocaleLowerCase();
+    const filtered = nodes.filter(node => (node.name.toLocaleLowerCase().includes(needle) || (node.qualified_name || "").toLocaleLowerCase().includes(needle)) && ((!byId("relation").value && byId("layer").value !== "review") || (incident.get(node.id) || []).some(matchesRelation)));
+    const results = byId("results"); results.replaceChildren();
+    byId("results-status").textContent = filtered.length ? `Showing ${Math.min(cap, filtered.length)} of ${filtered.length} symbols.${filtered.length > cap ? " Narrow the search or filters to see more." : ""}` : "No symbols match. Clear the search or broaden the relation and layer filters.";
+    for (const node of filtered.slice(0, cap)) {
+      const row = element("li");
+      const button = element("button", undefined, "node-button");
+      button.type = "button"; button.dataset.nodeId = node.id;
+      button.setAttribute("aria-pressed", String(selected === node.id));
+      button.append(element("span", node.name, "name"), element("span", coordinate(node.evidence), "coordinate"));
+      button.addEventListener("click", () => select(node.id)); row.append(button); results.append(row);
+    }
+    if (selected !== null) select(selected);
+  }
+  byId("counts").textContent = `${nodes.length} symbols, ${edges.length} structural relationships, ${candidates.length} candidates. At most ${cap} entries are shown per list.`;
+  byId("search").addEventListener("input", render);
+  byId("relation").addEventListener("change", render);
+  byId("layer").addEventListener("change", render);
+  byId("reset").addEventListener("click", () => { byId("search").value = ""; byId("relation").value = ""; byId("layer").value = "all"; render(); byId("search").focus(); });
+  render();
+})();
+</script>
+</body>
+</html>

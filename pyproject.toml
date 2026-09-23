@@ -28,6 +28,12 @@ classifiers = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[project.scripts]
+rootweft = "rootweft.cli:main"
+
+[tool.setuptools.package-data]
+rootweft = ["assets/*.html"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
