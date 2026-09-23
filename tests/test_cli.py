@@ -331,3 +331,27 @@ def test_export_rejects_graph_output_alias(repo, monkeypatch, source):
     assert Path("graph.json").read_bytes() == original
     if source == "hardlink":
         assert Path("alias.html").read_bytes() == original
+
+
+def test_version_flag_reports_package_version(capsys):
+    from rootweft import __version__
+
+    assert run("--version") == 0
+    assert capsys.readouterr().out.strip() == f"rootweft {__version__}"
+
+
+def test_mcp_without_optional_extra_is_a_configuration_error(repo, monkeypatch, capsys):
+    import importlib
+
+    real_import = importlib.import_module
+
+    def missing_sdk(name, *args, **kwargs):
+        if name == "rootweft.mcp_server":
+            raise ModuleNotFoundError("No module named 'mcp'", name="mcp")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", missing_sdk)
+    assert run("mcp", "graph.json") == 2
+    result = capsys.readouterr()
+    assert result.out == ""
+    assert "rootweft[mcp]" in result.err

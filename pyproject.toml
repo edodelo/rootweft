@@ -1,42 +1,66 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "rootweft"
 version = "0.1.0a1"
-description = "Deterministic structural repository knowledge graphs"
+description = "Deterministic, offline-first structural knowledge graphs for Python, JavaScript and TypeScript repositories"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Rootweft contributors" }]
+keywords = ["knowledge-graph", "code-intelligence", "mcp", "static-analysis", "agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
 dependencies = [
     "httpx==0.28.1",
     "tree-sitter==0.25.2",
     "tree-sitter-javascript==0.25.0",
     "tree-sitter-typescript==0.23.2",
 ]
-license = { text = "Apache-2.0" }
-authors = [{ name = "Rootweft contributors" }]
-classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
-    "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[project.optional-dependencies]
+mcp = ["mcp==2.2.0"]
+
+[project.urls]
+Homepage = "https://github.com/edodelo/rootweft"
+Source = "https://github.com/edodelo/rootweft"
+Issues = "https://github.com/edodelo/rootweft/issues"
+Changelog = "https://github.com/edodelo/rootweft/blob/main/CHANGELOG.md"
+Security = "https://github.com/edodelo/rootweft/blob/main/SECURITY.md"
 
 [project.scripts]
 rootweft = "rootweft.cli:main"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.setuptools.package-data]
-rootweft = ["assets/*.html"]
+rootweft = ["assets/*.html", "skills/rootweft/*.md", "py.typed"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["rootweft"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
 
 [tool.ruff]
 target-version = "py311"

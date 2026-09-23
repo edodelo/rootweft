@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+from rootweft import __version__
 from rootweft.decide import (
     DecisionPolicy,
     DecisionProvider,
@@ -35,7 +36,17 @@ from rootweft.pipeline import BuildOptions, GraphLimits, build_structural_graph
 from rootweft.query import GraphIndex
 from rootweft.scanner import ScanLimits
 from rootweft.serialization import canonical_json, dump_graph, load_graph
+from rootweft.skill_installer import (
+    SkillInstallError,
+    SkillTarget,
+    install_skill,
+    mcp_config_snippet,
+    uninstall_skill,
+)
 from rootweft.viewer import render_viewer
+
+_SKILL_COMMANDS = {"install-skill", "uninstall-skill"}
+_MCP_CLIENTS = ("codex", "claude", "gemini", "hermes", "generic")
 
 
 class ConfigurationError(ValueError):
@@ -72,7 +83,17 @@ _DEFAULTS: dict[str, Any] = {
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rootweft")
+    parser = argparse.ArgumentParser(
+        prog="rootweft",
+        description=(
+            "Deterministic structural knowledge graphs for Python, JavaScript "
+            "and TypeScript repositories. Offline unless --provider and "
+            "--enable-remote are both given to build."
+        ),
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"rootweft {__version__}"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     for command in (
         "build",
@@ -86,7 +107,7 @@ def _parser() -> argparse.ArgumentParser:
         "provider-check",
         "mcp",
     ):
-        item = sub.add_parser(command)
+        item = sub.add_parser(command, help=_HELP[command])
         item.add_argument("--json", action="store_true", help="emit canonical JSON")
         if command == "build":
             item.add_argument("root", nargs="?", default=".")
@@ -149,7 +170,46 @@ def _parser() -> argparse.ArgumentParser:
         if command == "export-html":
             item.add_argument("--output")
             item.add_argument("--max-visible", type=int)
+    for command in ("install-skill", "uninstall-skill"):
+        item = sub.add_parser(command, help=_HELP[command])
+        item.add_argument(
+            "--target", required=True, choices=[target.value for target in SkillTarget]
+        )
+        item.add_argument("--scope", choices=("project", "user"), default="project")
+        item.add_argument(
+            "--dir", dest="skill_dir", help="hermes only: explicit skills directory"
+        )
+        item.add_argument(
+            "--dry-run", action="store_true", help="report the plan; change nothing"
+        )
+        if command == "install-skill":
+            item.add_argument(
+                "--no-backup",
+                dest="backup",
+                action="store_false",
+                help="refuse instead of backing up foreign content",
+            )
+    item = sub.add_parser("mcp-config", help=_HELP["mcp-config"])
+    item.add_argument("client", choices=_MCP_CLIENTS)
+    item.add_argument("graph", help="graph JSON artifact the server will load")
     return parser
+
+
+_HELP = {
+    "build": "scan a repository and write a graph artifact",
+    "search": "search node names",
+    "node": "show one node",
+    "neighbors": "list edges around a node",
+    "path": "shortest directed path between two nodes",
+    "explain": "explain one edge",
+    "stats": "graph statistics",
+    "export-html": "write a standalone offline HTML viewer",
+    "provider-check": "check remote provider credentials (network)",
+    "mcp": "serve one graph read-only over MCP stdio (extra: rootweft[mcp])",
+    "install-skill": "install the Rootweft Agent Skill for a harness",
+    "uninstall-skill": "remove files installed by install-skill",
+    "mcp-config": "print an MCP client configuration snippet (writes nothing)",
+}
 
 
 def _settings(args: argparse.Namespace) -> dict[str, Any]:
@@ -363,6 +423,24 @@ def _build(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     return code
 
 
+def _skill(args: argparse.Namespace) -> int:
+    directory = Path(args.skill_dir) if args.skill_dir else None
+    if args.command == "install-skill":
+        result = install_skill(
+            args.target,
+            args.scope,
+            directory=directory,
+            dry_run=args.dry_run,
+            backup=args.backup,
+        ).to_dict()
+    else:
+        result = uninstall_skill(
+            args.target, args.scope, directory=directory, dry_run=args.dry_run
+        ).to_dict()
+    _emit(result)
+    return 0
+
+
 def _dispatch(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     command = args.command
     if command in {"build", "provider-check"}:
@@ -390,10 +468,14 @@ def _dispatch(args: argparse.Namespace, settings: dict[str, Any]) -> int:
         try:
             module = importlib.import_module("rootweft.mcp_server")
         except ModuleNotFoundError as error:
-            if error.name != "rootweft.mcp_server":
+            missing = error.name or ""
+            if missing != "rootweft.mcp_server" and missing.split(".")[0] not in {
+                "mcp",
+                "pydantic",
+            }:
                 raise
             raise ConfigurationError(
-                "MCP support is not installed in this version"
+                'MCP support requires the optional extra: pip install "rootweft[mcp]"'
             ) from None
         return int(module.main([settings["graph"]]))
     if command == "export-html":
@@ -447,8 +529,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             args = _parser().parse_args(argv)
         except SystemExit as error:
             return int(error.code or 0)
+        if args.command in _SKILL_COMMANDS:
+            return _skill(args)
+        if args.command == "mcp-config":
+            sys.stdout.write(mcp_config_snippet(args.client, Path(args.graph)))
+            return 0
         return _dispatch(args, _settings(args))
-    except (ConfigurationError, ProviderConfigurationError) as error:
+    except (ConfigurationError, ProviderConfigurationError, SkillInstallError) as error:
         print(f"rootweft: {error}", file=sys.stderr)
         return 2
     except (CorruptGraphError, IncompatibleSchemaError):
