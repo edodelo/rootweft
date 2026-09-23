@@ -22,6 +22,8 @@ from rootweft.models import (
 from rootweft.resolver import internal_import_targets, resolve_references
 from rootweft.scanner import ScanLimits, ScannedFile, scan_repository
 
+_GLOBAL_SCAN_LIMITS = frozenset({"max_files", "max_total_bytes"})
+
 
 @dataclass(frozen=True)
 class GraphLimits:
@@ -55,6 +57,10 @@ class BuildOptions:
 def build_structural_graph(options: BuildOptions) -> GraphDocument:
     """Scan and extract a repository without executing or importing its code."""
     scan = scan_repository(options.root, options.limits)
+    for diagnostic in scan.diagnostics:
+        # A truncated scan must never be published as a complete graph.
+        if diagnostic.code in _GLOBAL_SCAN_LIMITS:
+            raise ValueError(f"{diagnostic.code} exceeded")
     budget = options.graph_limits
     nodes: list[Node] = []
     edges: list[Edge] = []

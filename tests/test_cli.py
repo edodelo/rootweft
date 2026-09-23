@@ -134,11 +134,15 @@ def test_dry_run_egress_never_constructs_provider_or_opens_sockets(
     )
     result = json.loads(capsys.readouterr().out)
     assert set(result) == {
+        "provider",
+        "destination",
         "candidate_count",
         "question_count",
         "paths",
         "estimated_bytes",
     }
+    assert result["provider"] == "typesafe"
+    assert result["destination"] == "https://api.typesafe.ai/v1/systemone"
     assert not Path("graph.json").exists()
 
 
@@ -355,3 +359,14 @@ def test_mcp_without_optional_extra_is_a_configuration_error(repo, monkeypatch, 
     result = capsys.readouterr()
     assert result.out == ""
     assert "rootweft[mcp]" in result.err
+
+
+def test_scan_limit_does_not_replace_existing_graph(repo, capsys):
+    (repo / "second.py").write_text("def other():\n    pass\n", encoding="utf-8")
+    assert run("build", repo, "--output", "graph.json") == 0
+    good = Path("graph.json").read_bytes()
+    capsys.readouterr()
+    assert run("build", repo, "--output", "graph.json", "--max-files", "1") == 3
+    result = capsys.readouterr()
+    assert result.out == ""
+    assert Path("graph.json").read_bytes() == good

@@ -334,13 +334,18 @@ def _policy(settings: dict[str, Any]) -> DecisionPolicy:
     )
 
 
-def _provider(args: argparse.Namespace, policy: DecisionPolicy) -> DecisionProvider:
-    factory = (
+def _provider_class(
+    args: argparse.Namespace,
+) -> type[TypeSafeProvider]:
+    return (
         TypeSafeProvider
         if args.provider == "typesafe"
         else OpenRouterExperimentalProvider
     )
-    return factory(policy=policy)
+
+
+def _provider(args: argparse.Namespace, policy: DecisionPolicy) -> DecisionProvider:
+    return _provider_class(args)(policy=policy)
 
 
 def _emit(value: Any) -> None:
@@ -386,7 +391,14 @@ def _build(args: argparse.Namespace, settings: dict[str, Any]) -> int:
     except ValueError:
         raise BuildError("repository scan or build failed") from None
     if args.dry_run_egress:
-        _emit(preview_egress(document, policy).to_dict())
+        factory = _provider_class(args) if args.provider else None
+        _emit(
+            {
+                "provider": None if factory is None else factory.name,
+                "destination": None if factory is None else factory._endpoint,
+                **preview_egress(document, policy).to_dict(),
+            }
+        )
         return 0
     code = 0
     try:

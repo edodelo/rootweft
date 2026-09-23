@@ -168,3 +168,26 @@ def test_candidate_limit_fails_closed(tmp_path: Path) -> None:
                 tmp_path, ScanLimits(), graph_limits=GraphLimits(max_candidates=1)
             )
         )
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [ScanLimits(max_files=1), ScanLimits(max_total_bytes=8)],
+    ids=["max_files", "max_total_bytes"],
+)
+def test_global_scan_limits_fail_closed(tmp_path: Path, limits: ScanLimits) -> None:
+    """Catches a truncated or empty scan being published as a complete graph."""
+    for name in ("a.py", "b.py", "c.py"):
+        (tmp_path / name).write_text("def f():\n    return 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="exceeded"):
+        build_structural_graph(BuildOptions(tmp_path, limits))
+
+
+def test_oversized_single_file_is_skipped_not_fatal(tmp_path: Path) -> None:
+    (tmp_path / "small.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    (tmp_path / "large.py").write_text("x = 1\n" * 100, encoding="utf-8")
+    document = build_structural_graph(
+        BuildOptions(tmp_path, ScanLimits(max_file_bytes=100))
+    )
+    assert "max_file_bytes" in [d.code for d in document.structural.diagnostics]
+    assert any(node.name == "f" for node in document.structural.nodes)
