@@ -44,9 +44,7 @@ def test_egress_guard_blocks_secret_files_without_echoing_secret_text() -> None:
 
 def test_egress_guard_blocks_high_risk_credential_filename() -> None:
     """Catches an egress path that relies only on text matching for credentials."""
-    credential = ScannedFile(
-        "config/credentials.json", "json", "{}\n", "c" * 64
-    )
+    credential = ScannedFile("config/credentials.json", "json", "{}\n", "c" * 64)
 
     with pytest.raises(SecretEgressError) as raised:
         ensure_safe_for_egress((credential,))

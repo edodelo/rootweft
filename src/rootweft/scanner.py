@@ -385,13 +385,9 @@ def _walk_files_windows(
     if state.exhausted:
         return
     if not _windows_directory_is_within_anchor(directory, root_anchor):
-        _add_diagnostic(
-            diagnostics, "root_escape", _display_path(relative_directory)
-        )
+        _add_diagnostic(diagnostics, "root_escape", _display_path(relative_directory))
         return
-    before = _lstat_directory(
-        directory, _display_path(relative_directory), diagnostics
-    )
+    before = _lstat_directory(directory, _display_path(relative_directory), diagnostics)
     if before is None:
         return
     if not _same_file(before, expected_stat):
@@ -425,9 +421,7 @@ def _walk_files_windows(
     if after is None:
         return
     if not _windows_directory_is_within_anchor(directory, root_anchor):
-        _add_diagnostic(
-            diagnostics, "root_escape", _display_path(relative_directory)
-        )
+        _add_diagnostic(diagnostics, "root_escape", _display_path(relative_directory))
         return
     if not _same_file(after, expected_stat):
         _add_diagnostic(
@@ -502,9 +496,7 @@ def _bounded_sorted_entries(
     for entry in entries:
         if len(collected) >= state.max_directory_entries:
             state.exhausted = True
-            _add_diagnostic(
-                diagnostics, "max_files", _display_path(relative_directory)
-            )
+            _add_diagnostic(diagnostics, "max_files", _display_path(relative_directory))
             return None
         collected.append(entry)
     return sorted(collected, key=lambda entry: entry.name)
@@ -637,10 +629,9 @@ def _windows_handle_is_within_anchor(
         return True
     import msvcrt
 
-    final_path = _windows_final_path(int(msvcrt.get_osfhandle(descriptor)))
-    return final_path is not None and _windows_path_is_within_anchor(
-        final_path, anchor
-    )
+    handle = msvcrt.get_osfhandle(descriptor)  # type: ignore[attr-defined,unused-ignore]
+    final_path = _windows_final_path(int(handle))
+    return final_path is not None and _windows_path_is_within_anchor(final_path, anchor)
 
 
 def _open_windows_path_handle(
@@ -650,7 +641,9 @@ def _open_windows_path_handle(
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL(  # type: ignore[attr-defined,unused-ignore]
+        "kernel32", use_last_error=True
+    )
     create_file = kernel32.CreateFileW
     create_file.argtypes = [
         wintypes.LPCWSTR,
@@ -682,7 +675,9 @@ def _windows_final_path(handle: int) -> str | None:
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL(  # type: ignore[attr-defined,unused-ignore]
+        "kernel32", use_last_error=True
+    )
     get_final_path = kernel32.GetFinalPathNameByHandleW
     get_final_path.argtypes = [
         wintypes.HANDLE,
@@ -702,20 +697,21 @@ def _close_windows_handle(handle: int) -> None:
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = ctypes.WinDLL(  # type: ignore[attr-defined,unused-ignore]
+        "kernel32", use_last_error=True
+    )
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [wintypes.HANDLE]
     close_handle.restype = wintypes.BOOL
     close_handle(handle)
 
 
-def _windows_path_is_within_anchor(
-    final_path: str, anchor: _WindowsRootAnchor
-) -> bool:
+def _windows_path_is_within_anchor(final_path: str, anchor: _WindowsRootAnchor) -> bool:
     try:
-        return os.path.commonpath(
-            (_normalise_windows_path(final_path), anchor.final_path)
-        ) == anchor.final_path
+        return (
+            os.path.commonpath((_normalise_windows_path(final_path), anchor.final_path))
+            == anchor.final_path
+        )
     except ValueError:
         return False
 

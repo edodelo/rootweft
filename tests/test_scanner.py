@@ -28,7 +28,7 @@ def make_symlink_or_skip(link: Path, target: Path) -> None:
     try:
         link.symlink_to(target)
     except OSError as error:
-        pytest.skip(f"symlinks unavailable for this test user: {error.winerror}")
+        pytest.skip(f"symlinks unavailable for this test user: {error}")
 
 
 def make_junction_or_skip(link: Path, target: Path) -> None:
@@ -43,6 +43,16 @@ def make_junction_or_skip(link: Path, target: Path) -> None:
     )
     if result.returncode != 0:
         pytest.skip("junction creation unavailable for this test user")
+
+
+def is_directory(path: str | int | Path, target: Path) -> bool:
+    """Match a scandir argument (a path, or a directory descriptor on POSIX)."""
+    try:
+        observed = os.stat(path)
+        expected = target.stat()
+    except OSError:
+        return False
+    return (observed.st_dev, observed.st_ino) == (expected.st_dev, expected.st_ino)
 
 
 def test_scanner_excludes_credentials_and_vendor(tmp_path: Path) -> None:
@@ -186,9 +196,7 @@ def test_windows_file_swap_to_external_symlink_is_not_read(
     original_open = scanner.os.open
     swapped = False
 
-    def swap_at_open(
-        path: str | Path, flags: int, *args: object, **kwargs: int
-    ) -> int:
+    def swap_at_open(path: str | Path, flags: int, *args: object, **kwargs: int) -> int:
         nonlocal swapped
         candidate = Path(path)
         if candidate.name == "inside.py" and not swapped:
@@ -271,9 +279,7 @@ def test_windows_same_identity_symlink_escape_is_rejected_by_final_handle(
     original_open = scanner.os.open
     swapped = False
 
-    def swap_at_open(
-        path: str | Path, flags: int, *args: object, **kwargs: int
-    ) -> int:
+    def swap_at_open(path: str | Path, flags: int, *args: object, **kwargs: int) -> int:
         nonlocal swapped
         if Path(path) == inside_file and not swapped:
             inside_file.unlink()
@@ -373,23 +379,42 @@ def test_scanner_rejects_directory_replaced_by_an_outside_symlink(
     write(outside / "external.py", "outside = True\n")
     queued = tmp_path / "queued"
     write(queued / "inside.py", "inside = True\n")
-    original_scandir = scanner.os.scandir
     replaced = False
 
-    def replace_before_scan(path: str | Path) -> os.ScandirIterator[str]:
+    def replace_queued() -> None:
         nonlocal replaced
-        if Path(path).name == "queued" and not replaced:
-            replaced = True
-            for child in queued.iterdir():
-                child.unlink()
-            queued.rmdir()
-            make_symlink_or_skip(queued, outside)
-        return original_scandir(path)
+        replaced = True
+        for child in queued.iterdir():
+            child.unlink()
+        queued.rmdir()
+        make_symlink_or_skip(queued, outside)
 
-    monkeypatch.setattr(scanner.os, "scandir", replace_before_scan)
+    if os.name == "nt":
+        original_scandir = scanner.os.scandir
+
+        def replace_before_scan(path: str | Path) -> os.ScandirIterator[str]:
+            if not replaced and Path(path).name == "queued":
+                replace_queued()
+            return original_scandir(path)
+
+        monkeypatch.setattr(scanner.os, "scandir", replace_before_scan)
+    else:
+        # POSIX traversal opens each directory by descriptor, so the race window
+        # is between enumerating the parent and opening the child.
+        original_open = scanner.os.open
+
+        def replace_before_open(
+            path: str, flags: int, *args: object, **kwargs: object
+        ) -> int:
+            if not replaced and path == "queued" and "dir_fd" in kwargs:
+                replace_queued()
+            return original_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(scanner.os, "open", replace_before_open)
 
     result = scan_repository(tmp_path, ScanLimits())
 
+    assert replaced
     assert [item.path for item in result.files] == []
     assert "queued/external.py" not in [item.path for item in result.files]
     assert "symlink_skipped" in [item.code for item in result.diagnostics]
@@ -488,10 +513,10 @@ def test_scanner_reports_permission_denied_from_directory_boundary(
     write(tmp_path / "blocked/app.py", "blocked = True\n")
     original_scandir = scanner.os.scandir
 
-    def deny_blocked(path: str | Path) -> os.ScandirIterator[str]:
-        if Path(path).name == "blocked":
+    def deny_blocked(path: str | int | Path) -> os.ScandirIterator[str]:
+        if is_directory(path, tmp_path / "blocked"):
             raise PermissionError("test boundary")
-        return original_scandir(path)
+        return original_scandir(path)  # type: ignore[arg-type]
 
     monkeypatch.setattr(scanner.os, "scandir", deny_blocked)
 
@@ -508,8 +533,8 @@ def test_scanner_reports_disappearing_directory_from_os_boundary(
     write(tmp_path / "gone/app.py", "gone = True\n")
     original_scandir = scanner.os.scandir
 
-    def remove_before_scan(path: str | Path) -> os.ScandirIterator[str]:
-        if Path(path).name == "gone":
+    def remove_before_scan(path: str | int | Path) -> os.ScandirIterator[str]:
+        if is_directory(path, tmp_path / "gone"):
             raise FileNotFoundError("test boundary")
         return original_scandir(path)
 
